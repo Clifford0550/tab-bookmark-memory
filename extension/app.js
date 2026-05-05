@@ -492,25 +492,29 @@ function timeAgo(dateStr) {
 }
 
 /**
- * getGreeting() — "Good morning / afternoon / evening"
+ * getGreeting() — 中文问候，按时段切换
+ *   00:00–04:59  熬夜呢？
+ *   05:00–10:59  早上好
+ *   11:00–13:59  中午好
+ *   14:00–17:59  下午好
+ *   18:00–23:59  晚上好
  */
 function getGreeting() {
   const hour = new Date().getHours();
-  if (hour < 12) return 'Good morning';
-  if (hour < 17) return 'Good afternoon';
-  return 'Good evening';
+  if (hour < 5)  return '熬夜呢？';
+  if (hour < 11) return '早上好';
+  if (hour < 14) return '中午好';
+  if (hour < 18) return '下午好';
+  return '晚上好';
 }
 
 /**
- * getDateDisplay() — "Friday, April 4, 2026"
+ * getDateDisplay() — "2026 年 5 月 6 日 · 周三"
  */
 function getDateDisplay() {
-  return new Date().toLocaleDateString('en-US', {
-    weekday: 'long',
-    year:    'numeric',
-    month:   'long',
-    day:     'numeric',
-  });
+  const d = new Date();
+  const weekdayMap = ['日', '一', '二', '三', '四', '五', '六'];
+  return `${d.getFullYear()} 年 ${d.getMonth() + 1} 月 ${d.getDate()} 日 · 周${weekdayMap[d.getDay()]}`;
 }
 
 
@@ -2909,7 +2913,6 @@ function renderHistTopPages() {
           <strong>${visits.toLocaleString()}</strong>
           <span>次</span>
         </div>
-        <button class="hist-page-bookmark" data-bm-action="bookmark-page" title="收藏到 Chrome 书签">📌</button>
       </div>
     `;
   }).join('');
@@ -3014,37 +3017,6 @@ function renderHistHeatmap() {
   }
 }
 
-/* ---- Page bookmark action ---- */
-async function bookmarkHistPage(url, btnEl) {
-  if (!url || !chrome.bookmarks) return;
-  // Find page metadata from histVisits
-  const v = histVisits.find(x => x.url === url);
-  const title = v ? v.title : url;
-  try {
-    // Place new bookmark in "Other Bookmarks" (id "2"); fall back to first child of root
-    let parentId = '2';
-    try { await chrome.bookmarks.getSubTree(parentId); } catch { parentId = ''; }
-    if (!parentId) {
-      const tree = await chrome.bookmarks.getTree();
-      parentId = tree[0]?.children?.[1]?.id || tree[0]?.children?.[0]?.id;
-    }
-    if (!parentId) throw new Error('找不到「其他书签」目录');
-    await chrome.bookmarks.create({ parentId, title, url });
-    if (btnEl) {
-      btnEl.classList.add('is-done');
-      btnEl.textContent = '✓';
-      btnEl.disabled = true;
-      btnEl.title = '已收藏';
-    }
-    showToast?.('已加入 Chrome 书签');
-    // Bookmark cache may be stale next time user opens 整理收藏夹; mark invalidated
-    bmLoaded = false;
-  } catch (err) {
-    showToast?.('收藏失败: ' + (err.message || err));
-    console.warn('[tab-out] bookmark page failed', err);
-  }
-}
-
 async function renderHistoryInsights() {
   const status = document.getElementById('histStatus');
   if (!histItems.length) {
@@ -3116,17 +3088,6 @@ document.getElementById('histDomains')?.addEventListener('click', (e) => {
   } else {
     setHistFilter({ domain });
   }
-});
-
-/* ---- Page row: click bookmark button → save to chrome.bookmarks ---- */
-document.getElementById('histPages')?.addEventListener('click', (e) => {
-  const btn = e.target.closest('[data-bm-action="bookmark-page"]');
-  if (!btn) return;
-  e.preventDefault();
-  e.stopPropagation();
-  const row = btn.closest('.hist-page-row');
-  if (!row) return;
-  bookmarkHistPage(row.dataset.url, btn);
 });
 
 /* ---- Filter chips: clear ---- */

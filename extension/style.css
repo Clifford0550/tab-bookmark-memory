@@ -2336,9 +2336,9 @@ body[data-view="history"] .credit-other { display: inline; }
 }
 .hist-page-row {
   display: grid;
-  grid-template-columns: 20px minmax(0, 1fr) 180px 70px 32px;
+  grid-template-columns: 20px minmax(0, 1fr) 200px 80px;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   padding: 8px 12px;
   background: var(--card-bg);
   border: 1px solid var(--cream-soft);
@@ -2350,35 +2350,6 @@ body[data-view="history"] .credit-other { display: inline; }
   box-shadow: 0 4px 14px rgba(214, 104, 77, 0.15);
   border-color: var(--accent-amber);
 }
-.hist-page-bookmark {
-  width: 28px;
-  height: 28px;
-  border: 0;
-  border-radius: 999px;
-  background: var(--cream-soft);
-  color: var(--ink);
-  font-size: 13px;
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.15s, background 0.15s, transform 0.15s;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-}
-.hist-page-row:hover .hist-page-bookmark { opacity: 1; }
-.hist-page-bookmark:hover {
-  background: var(--accent-amber);
-  color: var(--paper);
-  transform: scale(1.1);
-}
-.hist-page-bookmark.is-done {
-  opacity: 1;
-  background: var(--accent-sage);
-  color: var(--paper);
-  cursor: default;
-}
-.hist-page-bookmark.is-done:hover { transform: none; }
 .hist-page-row .bm-favicon { width: 16px; height: 16px; flex-shrink: 0; }
 .hist-page-main {
   min-width: 0;
