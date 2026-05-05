@@ -52,7 +52,6 @@
   <nav class="view-tabs" id="viewTabs">
     <button class="view-tab is-active" data-view="tabs">浏览器标签</button>
     <button class="view-tab" data-view="bookmarks">整理收藏夹</button>
-    <button class="view-tab" data-view="insights">时间洞察</button>
     <button class="view-tab" data-view="history">近期足迹</button>
   </nav>
 
@@ -118,6 +117,33 @@
       <button class="bm-refresh" id="bmRefresh" title="刷新">↻</button>
     </div>
 
+    <!-- Mode toggle: 时光机 (retrospective) vs 浏览整理 (organize) -->
+    <div class="bm-mode-toggle">
+      <button class="bm-mode-btn is-active" data-mode="timemachine">🕰 时光机</button>
+      <button class="bm-mode-btn" data-mode="organize">🗂 浏览整理</button>
+    </div>
+
+    <!-- TIME MACHINE VIEW: scrollable strip of period cards with CTA -->
+    <div class="bm-tm-view" id="bmTmView">
+      <div class="bm-tm-intro" id="bmTmIntro"></div>
+      <div class="bm-tm-controls">
+        <span class="bm-tm-controls-label">每段时长</span>
+        <select class="bm-select" id="bmTmWindow">
+          <option value="3">3 个月</option>
+          <option value="6" selected>6 个月</option>
+          <option value="12">12 个月</option>
+        </select>
+      </div>
+      <div class="bm-tm-strip" id="bmTmStrip"></div>
+      <div class="bm-tm-status" id="bmTmStatus"></div>
+    </div>
+
+    <!-- ORGANIZE VIEW: existing toolbar + filters + lanes (hidden by default) -->
+    <div class="bm-org-view" id="bmOrgView" style="display:none">
+
+      <!-- Period scope banner — appears when entered via 时光机 CTA -->
+      <div class="bm-period-banner" id="bmPeriodBanner" style="display:none"></div>
+
     <!-- Toolbar: filters + sort + folder filter -->
     <div class="bm-toolbar">
       <button class="bm-filter is-active" data-filter="all">全部 <span class="bm-pill" id="bmAllCount"></span></button>
@@ -150,7 +176,7 @@
     <!-- Selection action bar — appears when 1+ items checked -->
     <div class="bm-selection-bar" id="bmSelectionBar" style="display:none">
       <span class="bm-sel-count" id="bmSelCount">已选 0 项</span>
-      <button class="bm-sel-clear" id="bmSelClear" title="清除选择">清除</button>
+      <button class="bm-sel-clear" id="bmSelClear" title="取消选择">取消</button>
       <div class="bm-sel-spacer"></div>
       <select class="bm-select" id="bmBulkMoveSelect" title="批量移动到文件夹">
         <option value="">批量移动到…</option>
@@ -163,31 +189,8 @@
 
     <div class="bm-list" id="bmList"></div>
     <div class="bm-status" id="bmStatus"></div>
-  </div>
 
-  <!-- ================================================================
-       时间洞察 — Timeline insights (buckets bookmarks by 6mo windows)
-       ================================================================ -->
-  <div class="ins-section view-pane" id="insSection" data-view="insights">
-    <div class="section-header">
-      <h2>时间洞察</h2>
-      <div class="section-line"></div>
-      <div class="section-count" id="insCount"></div>
-      <button class="bm-refresh" id="insRefresh" title="刷新">↻</button>
-    </div>
-
-    <div class="ins-controls">
-      <span class="ins-controls-label">时间窗口</span>
-      <select class="bm-select" id="insWindow">
-        <option value="3">3 个月</option>
-        <option value="6" selected>6 个月</option>
-        <option value="12">12 个月</option>
-      </select>
-      <span class="ins-controls-hint">看你某段时间在关注什么 — 域名集中度 + 标题关键词 + 月度密度</span>
-    </div>
-
-    <div class="ins-list" id="insList"></div>
-    <div class="ins-status" id="insStatus"></div>
+    </div><!-- end .bm-org-view -->
   </div>
 
   <!-- ================================================================
@@ -216,36 +219,27 @@
     <!-- Top stats strip -->
     <section class="hist-stats" id="histStats"></section>
 
-    <!-- 24-hour activity timeline (vertical bars) -->
-    <section class="hist-block">
-      <div class="hist-block-head">
-        <h3>一天的时间轴</h3>
-        <span class="hist-block-hint">每小时一根柱，高度 = 访问量，颜色叠加 = 类别构成</span>
-      </div>
-      <div class="hist-clock-wrap">
-        <div class="hist-clock-status" id="histClockStatus"></div>
-        <div class="hist-clock-svg" id="histClock"></div>
-        <div class="hist-clock-side">
-          <div class="hist-peak-list" id="histPeakList"></div>
-          <div class="hist-clock-legend" id="histClockLegend"></div>
-        </div>
-      </div>
-    </section>
+    <!-- Active filter chips (cell / domain) -->
+    <div class="hist-filter-chips" id="histFilterChips" style="display:none"></div>
 
-    <!-- Category breakdown -->
+    <!-- 7×24 weekly heatmap — click any cell to drill down -->
     <section class="hist-block">
       <div class="hist-block-head">
-        <h3>类别分布</h3>
-        <span class="hist-block-hint">按访问次数分配</span>
+        <h3>一周作息热力图</h3>
+        <span class="hist-block-hint">行 = 星期，列 = 小时；点任一格 → 下方过滤到该时段</span>
       </div>
-      <div class="hist-categories" id="histCategories"></div>
+      <div class="hist-heatmap-wrap">
+        <div class="hist-heatmap-status" id="histClockStatus"></div>
+        <div class="hist-heatmap" id="histClock"></div>
+        <div class="hist-heatmap-peaks" id="histPeakList"></div>
+      </div>
     </section>
 
     <!-- Top domains -->
     <section class="hist-block">
       <div class="hist-block-head">
         <h3>高频域名</h3>
-        <span class="hist-block-hint">这段时间访问最多的网站</span>
+        <span class="hist-block-hint">点行过滤页面到该域名</span>
       </div>
       <div class="hist-domains" id="histDomains"></div>
     </section>

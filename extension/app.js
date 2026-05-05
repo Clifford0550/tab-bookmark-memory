@@ -1509,6 +1509,9 @@ let bmSort = 'folder';
 let bmFolderFilterId = '';
 let bmSelected = new Set();
 let bmCollapsedGroups = new Set();
+let bmMode = 'timemachine';        // 'timemachine' | 'organize'
+let bmPeriodFilter = null;          // {start, end, label} | null — restricts list to a chosen bucket
+let bmTmWindowMonths = 6;           // 3 | 6 | 12 — granularity of the time machine strip
 
 function normalizeBmUrl(url) {
   try {
@@ -1676,6 +1679,9 @@ function bmAgeYears(b) {
 
 function applyBmFilter(items) {
   let out = items;
+  if (bmPeriodFilter) {
+    out = out.filter(b => b.dateAdded >= bmPeriodFilter.start && b.dateAdded <= bmPeriodFilter.end);
+  }
   if (bmFolderFilterId) {
     out = out.filter(b => b.parentId === bmFolderFilterId);
   }
@@ -1868,6 +1874,8 @@ function renderBmList() {
   const list = document.getElementById('bmList');
   const status = document.getElementById('bmStatus');
   if (!list) return;
+  // Keep period banner numbers fresh whenever list re-renders
+  if (bmPeriodFilter) renderBmPeriodBanner();
 
   // Special mode: show empty folders, not bookmarks
   if (bmFilter === 'empty-folders') {
@@ -1988,6 +1996,7 @@ async function loadBookmarks() {
     bmDeadIds = new Set();
     populateBmFolderFilter();
     renderBmList();
+    if (bmMode === 'timemachine') renderTimemachine();
     bmLoaded = true;
     detectDeadLinksInBackground();
   } catch (err) {
@@ -2190,6 +2199,203 @@ async function bulkDedupe() {
   showToast?.(`已删除 ${toRemove.length} 条重复书签`);
   await loadBookmarks();
 }
+
+/* ================================================================
+   时光机 (Time Machine) — retrospective entry into bookmark cleanup
+
+   Lets the user look back at 6-month periods of their bookmarking
+   history before judging individual items. Each period card shows
+   top domains/keywords/density + a CTA that scopes the organize
+   view to just that period.
+   ================================================================ */
+
+function setBmMode(mode) {
+  bmMode = mode;
+  document.querySelectorAll('.bm-mode-btn').forEach(btn => {
+    btn.classList.toggle('is-active', btn.dataset.mode === mode);
+  });
+  const tmEl  = document.getElementById('bmTmView');
+  const orgEl = document.getElementById('bmOrgView');
+  if (tmEl)  tmEl.style.display  = mode === 'timemachine' ? '' : 'none';
+  if (orgEl) orgEl.style.display = mode === 'organize'    ? '' : 'none';
+  if (mode === 'timemachine') {
+    // Clean slate: leaving organize means dropping period scope + selection
+    if (bmPeriodFilter) {
+      bmPeriodFilter = null;
+      bmSelected.clear();
+      renderBmPeriodBanner();
+    }
+    if (bmLoaded) renderTimemachine();
+  } else {
+    renderBmPeriodBanner();
+    if (bmLoaded) renderBmList();
+  }
+}
+
+function renderBmPeriodBanner() {
+  const banner = document.getElementById('bmPeriodBanner');
+  if (!banner) return;
+  if (!bmPeriodFilter) {
+    banner.style.display = 'none';
+    banner.innerHTML = '';
+    return;
+  }
+  const visible = applyBmSort(applyBmFilter(bmFlat));
+  banner.style.display = '';
+  banner.innerHTML = `
+    <button class="bm-period-back" data-bm-action="back-tm">← 返回时光机</button>
+    <div class="bm-period-info">
+      正在整理 <strong>${escapeHtml(bmPeriodFilter.label)}</strong>
+      <span class="bm-period-count">${visible.length} 条在视野</span>
+    </div>
+    <button class="bm-period-clear" data-bm-action="clear-period">清除时期筛选</button>
+  `;
+}
+
+function renderTimemachine() {
+  const intro  = document.getElementById('bmTmIntro');
+  const strip  = document.getElementById('bmTmStrip');
+  const status = document.getElementById('bmTmStatus');
+  if (!strip) return;
+
+  const itemsWithDate = bmFlat.filter(b => b.dateAdded > 0);
+  if (!itemsWithDate.length) {
+    if (intro) intro.innerHTML = '<div class="bm-tm-intro-title">还没有可看的时光</div>';
+    strip.innerHTML = '';
+    if (status) status.textContent = bmFlat.length ? '你的书签都没有时间戳，时光机帮不了你 😅' : '';
+    return;
+  }
+
+  // Bucket by current granularity (3/6/12 months)
+  const buckets = insBucketBookmarks(itemsWithDate, bmTmWindowMonths);
+  // Cards displayed oldest-first (left = past, right = now) for narrative flow
+  const oldestFirst = buckets.slice().reverse();
+
+  // Total stats for intro
+  const totalItems = bmFlat.length;
+  const oldest = itemsWithDate.reduce((min, b) => b.dateAdded < min ? b.dateAdded : min, Infinity);
+  const spanYears = (Date.now() - oldest) / (365 * 86400000);
+  if (intro) {
+    intro.innerHTML = `
+      <div class="bm-tm-intro-title">你的收藏时光机</div>
+      <div class="bm-tm-intro-stat">共 <strong>${totalItems.toLocaleString()}</strong> 条 · 跨越 <strong>${spanYears.toFixed(1)}</strong> 年 · 切成 <strong>${oldestFirst.length}</strong> 个时期</div>
+      <div class="bm-tm-intro-hint">从最早开始过一遍 — 删除当年的执念，保留还没过期的好奇</div>
+    `;
+  }
+
+  strip.innerHTML = oldestFirst.map(renderTmCard).join('');
+  if (status) status.textContent = '';
+}
+
+function renderTmCard(bucket) {
+  const periodLabel = insFormatRange(bucket);
+  const domains = insTopDomains(bucket.items, 4);
+  const keywords = insExtractKeywords(bucket.items, 10);
+  const density = insMonthlyDensity(bucket);
+  const maxC = Math.max(...density.map(d => d.count), 1);
+
+  const sparkline = density.map(d => {
+    const h = d.count > 0 ? Math.max(4, Math.round((d.count / maxC) * 28)) : 2;
+    return `<span class="bm-tm-bar" style="height:${h}px" title="${d.year}-${String(d.month + 1).padStart(2, '0')}: ${d.count} 条"></span>`;
+  }).join('');
+
+  const monthLabels = density.map(d => `<span class="bm-tm-bar-label">${d.month + 1}</span>`).join('');
+
+  const domainsHtml = domains.length
+    ? domains.map(([d, c]) => `<span class="bm-tm-domain">${escapeHtml(d)} <span class="bm-tm-c">${c}</span></span>`).join('')
+    : '<span class="bm-tm-empty">—</span>';
+
+  const minK = keywords.length ? keywords[keywords.length - 1][1] : 1;
+  const maxK = keywords.length ? keywords[0][1] : 1;
+  const keywordsHtml = keywords.length
+    ? keywords.map(([w, c]) => {
+        const ratio = maxK === minK ? 0.5 : (c - minK) / (maxK - minK);
+        const size = (12 + ratio * 5).toFixed(1);
+        const weight = ratio > 0.6 ? 700 : ratio > 0.3 ? 600 : 500;
+        return `<span class="bm-tm-kw" style="font-size:${size}px;font-weight:${weight}" title="${c} 次">${escapeHtml(w)}</span>`;
+      }).join('')
+    : '<span class="bm-tm-empty">标题里没找到关键词</span>';
+
+  return `
+    <article class="bm-tm-card"
+             data-period-start="${bucket.start.getTime()}"
+             data-period-end="${bucket.end.getTime()}"
+             data-period-label="${escapeHtml(periodLabel)}">
+      <header class="bm-tm-card-head">
+        <div class="bm-tm-card-period">${escapeHtml(periodLabel)}</div>
+        <div class="bm-tm-card-count">${bucket.items.length} 条</div>
+      </header>
+      <div class="bm-tm-spark-wrap">
+        <div class="bm-tm-spark">${sparkline}</div>
+        <div class="bm-tm-spark-labels">${monthLabels}</div>
+      </div>
+      <div class="bm-tm-block">
+        <div class="bm-tm-block-label">主要域名</div>
+        <div class="bm-tm-domains">${domainsHtml}</div>
+      </div>
+      <div class="bm-tm-block">
+        <div class="bm-tm-block-label">关键词</div>
+        <div class="bm-tm-keywords">${keywordsHtml}</div>
+      </div>
+      <button class="bm-tm-cta" data-bm-action="open-period">
+        整理这一时期
+        <span class="bm-tm-cta-arrow">→</span>
+      </button>
+    </article>
+  `;
+}
+
+/* ---- Time machine event wiring ---- */
+document.querySelectorAll('.bm-mode-btn').forEach(btn => {
+  btn.addEventListener('click', () => setBmMode(btn.dataset.mode));
+});
+
+document.getElementById('bmTmWindow')?.addEventListener('change', (e) => {
+  bmTmWindowMonths = parseInt(e.target.value, 10) || 6;
+  if (bmLoaded) renderTimemachine();
+});
+
+document.getElementById('bmTmStrip')?.addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-bm-action="open-period"]');
+  if (!btn) return;
+  const card = btn.closest('.bm-tm-card');
+  if (!card) return;
+  const start = parseInt(card.dataset.periodStart, 10);
+  const end   = parseInt(card.dataset.periodEnd, 10);
+  if (!start || !end) return;
+
+  bmPeriodFilter = { start, end, label: card.dataset.periodLabel };
+
+  // Reset all other filters so the user lands on a clean "全部" view scoped
+  // only to the chosen period — never inherit stale filter state from a
+  // previous visit to organize mode.
+  bmFilter = 'all';
+  bmFolderFilterId = '';
+  document.querySelectorAll('.bm-filter').forEach(b =>
+    b.classList.toggle('is-active', b.dataset.filter === 'all'));
+  const folderSel = document.getElementById('bmFolderFilter');
+  if (folderSel) folderSel.value = '';
+
+  // Pre-select every bookmark in this period — user can uncheck the keepers
+  // and one-shot delete/move the rest. Reduces decision fatigue.
+  bmSelected = new Set(
+    bmFlat.filter(b => b.dateAdded >= start && b.dateAdded <= end).map(b => b.id)
+  );
+  setBmMode('organize');
+});
+
+document.getElementById('bmPeriodBanner')?.addEventListener('click', (e) => {
+  const back = e.target.closest('[data-bm-action="back-tm"]');
+  if (back) { setBmMode('timemachine'); return; }
+  const clear = e.target.closest('[data-bm-action="clear-period"]');
+  if (clear) {
+    bmPeriodFilter = null;
+    bmSelected.clear();
+    renderBmPeriodBanner();
+    renderBmList();
+  }
+});
+
 
 /* ---- Bookmarks event wiring ---- */
 document.getElementById('bmRefresh')?.addEventListener('click', () => {
@@ -2441,8 +2647,6 @@ const INS_STOPWORDS = new Set([
   '关于','已经','还是','不是','还有','但是','所以','因为','虽然','只是','非常','通过',
 ]);
 
-let insLoaded = false;
-let insWindowMonths = 6;
 
 function insBucketBookmarks(items, monthsPerBucket) {
   const buckets = new Map();
@@ -2520,88 +2724,6 @@ function insFormatRange(bucket) {
     : `${sStr} – ${eStr}`;
 }
 
-function renderInsightCard(bucket) {
-  const domains = insTopDomains(bucket.items, 6);
-  const keywords = insExtractKeywords(bucket.items, 18);
-  const density = insMonthlyDensity(bucket);
-  const maxC = Math.max(...density.map(d => d.count), 1);
-
-  const sparkline = density.map(d => {
-    const h = d.count > 0 ? Math.max(4, Math.round((d.count / maxC) * 32)) : 2;
-    return `<span class="ins-bar" style="height:${h}px" title="${d.year}-${String(d.month + 1).padStart(2, '0')}: ${d.count} 条"></span>`;
-  }).join('');
-
-  const monthLabels = density.map(d => `<span class="ins-bar-label">${d.month + 1}</span>`).join('');
-
-  const domainsHtml = domains.map(([d, c]) =>
-    `<span class="ins-domain"><span class="ins-domain-name">${escapeHtml(d)}</span><span class="ins-domain-c">${c}</span></span>`
-  ).join('');
-
-  const minK = keywords.length ? keywords[keywords.length - 1][1] : 1;
-  const maxK = keywords.length ? keywords[0][1] : 1;
-  const keywordsHtml = keywords.map(([w, c]) => {
-    const ratio = maxK === minK ? 0.5 : (c - minK) / (maxK - minK);
-    const size = (14 + ratio * 10).toFixed(1);
-    const weight = ratio > 0.6 ? 700 : ratio > 0.3 ? 600 : 500;
-    return `<span class="ins-kw" style="font-size:${size}px;font-weight:${weight}" title="${c} 次">${escapeHtml(w)}</span>`;
-  }).join('');
-
-  return `
-    <div class="ins-card">
-      <div class="ins-card-head">
-        <div class="ins-period">${escapeHtml(insFormatRange(bucket))}</div>
-        <div class="ins-count">${bucket.items.length} 条</div>
-      </div>
-      <div class="ins-spark-wrap">
-        <div class="ins-spark">${sparkline}</div>
-        <div class="ins-spark-labels">${monthLabels}</div>
-      </div>
-      <div class="ins-block">
-        <div class="ins-label">主要域名</div>
-        <div class="ins-domains">${domainsHtml || '<span class="ins-empty-text">无</span>'}</div>
-      </div>
-      <div class="ins-block">
-        <div class="ins-label">关键词</div>
-        <div class="ins-keywords">${keywordsHtml || '<span class="ins-empty-text">标题里没找到关键词</span>'}</div>
-      </div>
-    </div>
-  `;
-}
-
-function renderInsights() {
-  const list   = document.getElementById('insList');
-  const count  = document.getElementById('insCount');
-  const status = document.getElementById('insStatus');
-  if (!list) return;
-  const buckets = insBucketBookmarks(bmFlat, insWindowMonths);
-  if (count) count.textContent = `${bmFlat.length} 条 · ${buckets.length} 个时段`;
-  if (!buckets.length) {
-    list.innerHTML = '<div class="ins-empty">没有可分析的书签（书签需要带时间戳）。</div>';
-  } else {
-    list.innerHTML = buckets.map(renderInsightCard).join('');
-  }
-  if (status) status.textContent = '';
-}
-
-async function loadInsights() {
-  const status = document.getElementById('insStatus');
-  if (!bmLoaded) {
-    if (status) status.textContent = '正在读取书签…';
-    await loadBookmarks();
-  }
-  insLoaded = true;
-  renderInsights();
-}
-
-document.getElementById('insRefresh')?.addEventListener('click', async () => {
-  bmLoaded = false; insLoaded = false;
-  await loadInsights();
-});
-
-document.getElementById('insWindow')?.addEventListener('change', (e) => {
-  insWindowMonths = parseInt(e.target.value, 10) || 6;
-  if (insLoaded) renderInsights();
-});
 
 
 /* ================================================================
@@ -2613,8 +2735,10 @@ document.getElementById('insWindow')?.addEventListener('change', (e) => {
    ================================================================ */
 
 let histLoaded = false;
-let histWindowDays = 30;
+let histWindowDays = 7;
 let histItems = [];
+let histVisits = [];                  // [{url,title,dow,hour,visitTime,visitCount}] raw per-visit timestamps
+let histFilter = { cell: null, domain: null };   // active drill-down filters
 
 async function loadHistoryInsights() {
   const status = document.getElementById('histStatus');
@@ -2639,131 +2763,145 @@ function histDomainOf(url) {
   try { return new URL(url).hostname.toLowerCase().replace(/^www\./, ''); } catch { return ''; }
 }
 
+const HIST_DOW_LABELS = ['日', '一', '二', '三', '四', '五', '六'];
+
+/* ---- Filter helpers ---- */
+function getHistFilteredVisits() {
+  let v = histVisits;
+  if (histFilter.cell)   v = v.filter(x => x.dow === histFilter.cell.dow && x.hour === histFilter.cell.hour);
+  if (histFilter.domain) v = v.filter(x => histDomainOf(x.url) === histFilter.domain);
+  return v;
+}
+
+function setHistFilter(patch) {
+  Object.assign(histFilter, patch);
+  renderHistFilterChips();
+  // Cell filter affects heatmap "active" cell; domain filter doesn't
+  renderHistHeatmap();
+  renderHistTopDomains();
+  renderHistTopPages();
+  renderHistStats();
+}
+
+function clearHistFilter() {
+  histFilter = { cell: null, domain: null };
+  renderHistFilterChips();
+  renderHistHeatmap();
+  renderHistTopDomains();
+  renderHistTopPages();
+  renderHistStats();
+}
+
+function renderHistFilterChips() {
+  const wrap = document.getElementById('histFilterChips');
+  if (!wrap) return;
+  const chips = [];
+  if (histFilter.cell) {
+    const { dow, hour } = histFilter.cell;
+    chips.push(`<button class="hist-chip" data-clear="cell">🕒 周${HIST_DOW_LABELS[dow]} ${String(hour).padStart(2,'0')}:00 <span class="hist-chip-x">✕</span></button>`);
+  }
+  if (histFilter.domain) {
+    chips.push(`<button class="hist-chip" data-clear="domain">🌐 ${escapeHtml(histFilter.domain)} <span class="hist-chip-x">✕</span></button>`);
+  }
+  if (!chips.length) {
+    wrap.style.display = 'none';
+    wrap.innerHTML = '';
+    return;
+  }
+  wrap.style.display = '';
+  wrap.innerHTML = `
+    <span class="hist-chips-label">当前过滤</span>
+    ${chips.join('')}
+    <button class="hist-chip-clear" data-clear="all">全部清除</button>
+  `;
+}
+
+/* ---- Stats strip ---- */
 function renderHistStats() {
   const wrap = document.getElementById('histStats');
   const count = document.getElementById('histCount');
   if (!wrap) return;
-  const totalItems = histItems.length;
-  const totalVisits = histItems.reduce((s, it) => s + (it.visitCount || 0), 0);
-  const uniqueDomains = new Set();
-  for (const it of histItems) { const d = histDomainOf(it.url); if (d) uniqueDomains.add(d); }
-  if (count) count.textContent = totalItems ? `${totalItems} 个页面 · ${histWindowDays} 天` : '';
+  const filtered = getHistFilteredVisits();
+  const visitsTotal = filtered.length;
+  const uniqueUrls = new Set(filtered.map(v => v.url));
+  const uniqueDomains = new Set(filtered.map(v => histDomainOf(v.url)).filter(Boolean));
+  if (count) {
+    count.textContent = histItems.length
+      ? `${histItems.length} 个页面 · 最近 ${histWindowDays} 天`
+      : '';
+  }
   wrap.innerHTML = `
-    <div class="hist-stat"><div class="hist-stat-num">${totalItems.toLocaleString()}</div><div class="hist-stat-label">不同页面</div></div>
+    <div class="hist-stat"><div class="hist-stat-num">${visitsTotal.toLocaleString()}</div><div class="hist-stat-label">访问次数</div></div>
+    <div class="hist-stat"><div class="hist-stat-num">${uniqueUrls.size.toLocaleString()}</div><div class="hist-stat-label">不同页面</div></div>
     <div class="hist-stat"><div class="hist-stat-num">${uniqueDomains.size.toLocaleString()}</div><div class="hist-stat-label">不同域名</div></div>
-    <div class="hist-stat"><div class="hist-stat-num">${totalVisits.toLocaleString()}</div><div class="hist-stat-label">总访问次数 (历史累计)</div></div>
   `;
 }
 
-function renderHistCategories() {
-  const wrap = document.getElementById('histCategories');
-  if (!wrap) return;
-  // Aggregate visit counts by category
-  const cats = new Map(); // label -> { label, cls, visits, domains: Set }
-  let other = { label: '其他', cls: 'cat-other', visits: 0, domains: new Set() };
-  for (const it of histItems) {
-    const cat = bmCategoryFor(it.url);
-    const d = histDomainOf(it.url);
-    if (cat) {
-      const e = cats.get(cat.label) || { label: cat.label, cls: cat.cls, visits: 0, domains: new Set() };
-      e.visits += it.visitCount || 0;
-      if (d) e.domains.add(d);
-      cats.set(cat.label, e);
-    } else {
-      other.visits += it.visitCount || 0;
-      if (d) other.domains.add(d);
-    }
-  }
-  const all = [...cats.values()];
-  if (other.visits > 0) all.push(other);
-  const totalVisits = all.reduce((s, e) => s + e.visits, 0);
-  if (!totalVisits) {
-    wrap.innerHTML = '<div class="hist-empty">暂无数据</div>';
-    return;
-  }
-  all.sort((a, b) => b.visits - a.visits);
-  wrap.innerHTML = all.map(e => {
-    const pct = (e.visits / totalVisits * 100).toFixed(1);
-    return `
-      <div class="hist-cat-row">
-        <div class="hist-cat-label">
-          <span class="bm-tag bm-cat ${e.cls}">${escapeHtml(e.label)}</span>
-        </div>
-        <div class="hist-cat-bar-wrap">
-          <div class="hist-cat-bar ${e.cls}" style="width:${pct}%"></div>
-        </div>
-        <div class="hist-cat-stats">
-          <span class="hist-cat-pct">${pct}%</span>
-          <span class="hist-cat-count">${e.visits.toLocaleString()} 次 · ${e.domains.size} 域名</span>
-        </div>
-      </div>
-    `;
-  }).join('');
-}
-
+/* ---- Top domains (filtered, clickable) ---- */
 function renderHistTopDomains() {
   const wrap = document.getElementById('histDomains');
   if (!wrap) return;
+  const filtered = getHistFilteredVisits();
   const counts = new Map();
-  for (const it of histItems) {
-    const d = histDomainOf(it.url);
+  for (const v of filtered) {
+    const d = histDomainOf(v.url);
     if (!d) continue;
-    const e = counts.get(d) || { domain: d, visits: 0, pages: 0, lastVisit: 0 };
-    e.visits += it.visitCount || 0;
-    e.pages += 1;
-    if ((it.lastVisitTime || 0) > e.lastVisit) e.lastVisit = it.lastVisitTime || 0;
+    const e = counts.get(d) || { domain: d, visits: 0, urls: new Set() };
+    e.visits++;
+    e.urls.add(v.url);
     counts.set(d, e);
   }
   const top = [...counts.values()].sort((a, b) => b.visits - a.visits).slice(0, 15);
   if (!top.length) {
-    wrap.innerHTML = '<div class="hist-empty">暂无数据</div>';
+    wrap.innerHTML = '<div class="hist-empty">当前过滤下没有数据</div>';
     return;
   }
   const max = top[0].visits;
   wrap.innerHTML = top.map(e => {
     const pct = (e.visits / max * 100).toFixed(0);
-    const cat = bmCategoryFor('https://' + e.domain);
-    const catTag = cat ? `<span class="bm-tag bm-cat ${cat.cls}">${escapeHtml(cat.label)}</span>` : '';
+    const isActive = histFilter.domain === e.domain ? ' is-active' : '';
     return `
-      <div class="hist-domain-row">
+      <div class="hist-domain-row${isActive}" data-domain="${escapeHtml(e.domain)}">
         <img class="bm-favicon" src="${escapeHtml(`https://www.google.com/s2/favicons?domain=${e.domain}&sz=32`)}" alt="" loading="lazy">
         <div class="hist-domain-name">${escapeHtml(e.domain)}</div>
-        ${catTag}
         <div class="hist-domain-bar-wrap"><div class="hist-domain-bar" style="width:${pct}%"></div></div>
         <div class="hist-domain-stats">
-          <strong>${e.visits.toLocaleString()}</strong> 次 · ${e.pages} 页
+          <strong>${e.visits.toLocaleString()}</strong> 次 · ${e.urls.size} 页
         </div>
       </div>
     `;
   }).join('');
 }
 
+/* ---- Top pages (filtered, clickable, with bookmark button) ---- */
 function renderHistTopPages() {
   const wrap = document.getElementById('histPages');
   if (!wrap) return;
-  const sorted = histItems
-    .slice()
-    .sort((a, b) => (b.visitCount || 0) - (a.visitCount || 0))
-    .slice(0, 30);
-  if (!sorted.length) {
-    wrap.innerHTML = '<div class="hist-empty">暂无数据</div>';
+  const filtered = getHistFilteredVisits();
+  // Aggregate visits within filter by URL
+  const counts = new Map();
+  for (const v of filtered) {
+    const e = counts.get(v.url) || { url: v.url, title: v.title || v.url, visits: 0 };
+    e.visits++;
+    counts.set(v.url, e);
+  }
+  const top = [...counts.values()].sort((a, b) => b.visits - a.visits).slice(0, 30);
+  if (!top.length) {
+    wrap.innerHTML = '<div class="hist-empty">当前过滤下没有数据</div>';
     return;
   }
-  const max = sorted[0].visitCount || 1;
-  wrap.innerHTML = sorted.map(it => {
-    const d = histDomainOf(it.url);
-    const cat = bmCategoryFor(it.url);
-    const catTag = cat ? `<span class="bm-tag bm-cat ${cat.cls}">${escapeHtml(cat.label)}</span>` : '';
-    const visits = it.visitCount || 0;
+  const max = top[0].visits;
+  wrap.innerHTML = top.map(e => {
+    const d = histDomainOf(e.url);
+    const visits = e.visits;
     const pct = (visits / max * 100).toFixed(0);
     return `
-      <div class="hist-page-row">
+      <div class="hist-page-row" data-url="${escapeHtml(e.url)}">
         <img class="bm-favicon" src="${escapeHtml(`https://www.google.com/s2/favicons?domain=${d}&sz=32`)}" alt="" loading="lazy">
         <div class="hist-page-main">
-          <a class="hist-page-title" href="${escapeHtml(it.url)}" target="_blank" rel="noopener" title="${escapeHtml(it.title || it.url)}">${escapeHtml(it.title || it.url)}</a>
+          <a class="hist-page-title" href="${escapeHtml(e.url)}" target="_blank" rel="noopener" title="${escapeHtml(e.title)}">${escapeHtml(e.title)}</a>
           <div class="hist-page-meta">
             <span class="hist-page-domain">${escapeHtml(d)}</span>
-            ${catTag}
           </div>
         </div>
         <div class="hist-page-bar-wrap"><div class="hist-page-bar" style="width:${pct}%"></div></div>
@@ -2771,181 +2909,234 @@ function renderHistTopPages() {
           <strong>${visits.toLocaleString()}</strong>
           <span>次</span>
         </div>
+        <button class="hist-page-bookmark" data-bm-action="bookmark-page" title="收藏到 Chrome 书签">📌</button>
       </div>
     `;
   }).join('');
 }
 
-// Hex colors keyed by bm category class — used for SVG fill/stroke
-const HIST_CAT_COLOR = {
-  'cat-video':  '#C75B3F',
-  'cat-code':   '#6B5544',
-  'cat-ai':     '#3A2A1F',
-  'cat-news':   '#6E9F6E',
-  'cat-design': '#E89378',
-  'cat-learn':  '#D6A04D',
-  'cat-shop':   '#D6684D',
-  'cat-tool':   '#9C8169',
-  'cat-other':  '#C5B7A8',
-};
-
-async function loadHistClockData() {
+/* ---- 7×24 weekly heatmap ---- */
+async function loadHistVisits() {
   const status = document.getElementById('histClockStatus');
   if (status) status.textContent = '正在统计每次访问的时间…';
   const startTime = Date.now() - histWindowDays * 86400000;
   const items = histItems;
   const concurrency = 16;
   let cursor = 0;
-  // hour -> Map<categoryLabel, {label, cls, count}>
-  const grid = Array.from({ length: 24 }, () => new Map());
+  const visits = [];
   await Promise.all(Array.from({ length: concurrency }, async () => {
     while (cursor < items.length) {
       const it = items[cursor++];
       try {
         const list = await chrome.history.getVisits({ url: it.url });
-        const cat = bmCategoryFor(it.url);
-        const label = cat ? cat.label : '其他';
-        const cls   = cat ? cat.cls   : 'cat-other';
         for (const v of list) {
           if (!v.visitTime || v.visitTime < startTime) continue;
-          const hr = new Date(v.visitTime).getHours();
-          const m = grid[hr];
-          const e = m.get(label) || { label, cls, count: 0 };
-          e.count++;
-          m.set(label, e);
+          const d = new Date(v.visitTime);
+          visits.push({
+            url: it.url,
+            title: it.title || it.url,
+            visitTime: v.visitTime,
+            dow: d.getDay(),
+            hour: d.getHours(),
+          });
         }
       } catch { /* ignore unreadable URLs */ }
     }
   }));
+  histVisits = visits;
   if (status) status.textContent = '';
-  return grid;
 }
 
-function renderHistClock(grid) {
+function renderHistHeatmap() {
   const wrap = document.getElementById('histClock');
   const peakWrap = document.getElementById('histPeakList');
-  const legendWrap = document.getElementById('histClockLegend');
   if (!wrap) return;
 
-  const totalsByHour = grid.map(m => [...m.values()].reduce((s, e) => s + e.count, 0));
-  const maxCount = Math.max(...totalsByHour, 1);
-  const totalAll = totalsByHour.reduce((s, n) => s + n, 0);
+  // Heatmap is computed from full window (not filtered) so user can see
+  // overall pattern. Highlight active cell separately.
+  const grid = Array.from({ length: 7 }, () => new Array(24).fill(0));
+  for (const v of histVisits) grid[v.dow][v.hour]++;
 
-  if (!totalAll) {
+  let max = 0;
+  for (let d = 0; d < 7; d++) for (let h = 0; h < 24; h++) if (grid[d][h] > max) max = grid[d][h];
+
+  if (max === 0) {
     wrap.innerHTML = '<div class="hist-empty">暂无访问数据</div>';
     if (peakWrap) peakWrap.innerHTML = '';
-    if (legendWrap) legendWrap.innerHTML = '';
     return;
   }
 
-  // Consistent stacking order: most-visited categories at the bottom
-  const seenCats = new Map();
-  for (const m of grid) for (const e of m.values()) {
-    if (!seenCats.has(e.label)) seenCats.set(e.label, { label: e.label, cls: e.cls, count: 0 });
-    seenCats.get(e.label).count += e.count;
-  }
-  const orderedCats = [...seenCats.values()].sort((a, b) => b.count - a.count);
-  const peakHour = totalsByHour.indexOf(maxCount);
-
-  // Build 24 stacked columns
-  const cols = [];
+  // Build grid HTML
+  let html = '<div class="hist-hm-grid">';
+  // Header: empty corner + 24 hour labels
+  html += '<div class="hist-hm-corner"></div>';
   for (let h = 0; h < 24; h++) {
-    const total = totalsByHour[h];
-    const heightPct = (total / maxCount) * 100;
-    let segments = '';
-    if (total > 0) {
-      segments = orderedCats.map(cat => {
-        const e = grid[h].get(cat.label);
-        if (!e || !e.count) return '';
-        const segPct = (e.count / total) * 100;
-        const color = HIST_CAT_COLOR[cat.cls] || HIST_CAT_COLOR['cat-other'];
-        return `<div class="hist-hour-seg" style="height:${segPct.toFixed(2)}%;background:${color}" title="${h}:00 ${escapeHtml(cat.label)}: ${e.count}"></div>`;
-      }).join('');
-    }
-    const isPeak = h === peakHour && total > 0;
-    cols.push(`
-      <div class="hist-hour-col${isPeak ? ' is-peak' : ''}" title="${String(h).padStart(2,'0')}:00 — ${total} 次">
-        <div class="hist-hour-count">${total > 0 ? total : ''}</div>
-        <div class="hist-hour-stack" style="height:${heightPct.toFixed(2)}%">${segments}</div>
-        <div class="hist-hour-label">${String(h).padStart(2,'0')}</div>
-      </div>
-    `);
+    html += `<div class="hist-hm-hour">${h % 3 === 0 ? h : ''}</div>`;
   }
-  wrap.innerHTML = `<div class="hist-hourly-chart">${cols.join('')}</div>`;
+  // Body rows: 7 days
+  for (let dow = 0; dow < 7; dow++) {
+    html += `<div class="hist-hm-dow">周${HIST_DOW_LABELS[dow]}</div>`;
+    for (let h = 0; h < 24; h++) {
+      const c = grid[dow][h];
+      const intensity = c / max;
+      const op = c === 0 ? 0 : 0.18 + intensity * 0.82;
+      const isActive = histFilter.cell && histFilter.cell.dow === dow && histFilter.cell.hour === h;
+      const cls = ['hist-hm-cell'];
+      if (c > 0) cls.push('has-data');
+      if (isActive) cls.push('is-active');
+      html += `<div class="${cls.join(' ')}" data-dow="${dow}" data-hour="${h}" style="--op:${op.toFixed(2)}" title="周${HIST_DOW_LABELS[dow]} ${String(h).padStart(2,'0')}:00 — ${c} 次"></div>`;
+    }
+  }
+  html += '</div>';
+  wrap.innerHTML = html;
 
-  // Peak list — top 3 hours
+  // Peak list — top 3 cells (DOW × hour)
   if (peakWrap) {
-    const ranked = totalsByHour
-      .map((c, h) => ({ h, c }))
-      .filter(x => x.c > 0)
-      .sort((a, b) => b.c - a.c)
-      .slice(0, 3);
+    const cells = [];
+    for (let d = 0; d < 7; d++) for (let h = 0; h < 24; h++) {
+      if (grid[d][h] > 0) cells.push({ dow: d, hour: h, count: grid[d][h] });
+    }
+    cells.sort((a, b) => b.count - a.count);
+    const top = cells.slice(0, 3);
     peakWrap.innerHTML = `
-      <div class="hist-peak-title">活跃时段 TOP 3</div>
+      <div class="hist-peak-title">最活跃时段 TOP 3</div>
       <ol class="hist-peak-ol">
-        ${ranked.map(({ h, c }) => {
-          const dom = [...grid[h].values()].sort((a, b) => b.count - a.count)[0];
-          const color = HIST_CAT_COLOR[dom.cls];
-          const pct = ((c / totalAll) * 100).toFixed(0);
-          return `<li>
-            <span class="hist-peak-hour">${String(h).padStart(2,'0')}:00</span>
-            <span class="hist-peak-bar" style="background:${color}; width:${(c/maxCount*100).toFixed(0)}%"></span>
-            <span class="hist-peak-meta"><strong>${dom.label}</strong> · ${c} 次 · ${pct}%</span>
-          </li>`;
-        }).join('')}
+        ${top.map(c => `
+          <li class="hist-peak-item" data-dow="${c.dow}" data-hour="${c.hour}">
+            <span class="hist-peak-when">周${HIST_DOW_LABELS[c.dow]} ${String(c.hour).padStart(2,'0')}:00</span>
+            <span class="hist-peak-bar" style="width:${(c.count / max * 100).toFixed(0)}%"></span>
+            <span class="hist-peak-count">${c.count} 次</span>
+          </li>
+        `).join('')}
       </ol>
+      <div class="hist-peak-hint">点格子或这里都能聚焦那个时段</div>
     `;
   }
+}
 
-  // Legend — only categories that appear
-  if (legendWrap) {
-    const seen = new Map();
-    for (const m of grid) for (const e of m.values()) {
-      if (!seen.has(e.label)) seen.set(e.label, { label: e.label, cls: e.cls, count: 0 });
-      seen.get(e.label).count += e.count;
+/* ---- Page bookmark action ---- */
+async function bookmarkHistPage(url, btnEl) {
+  if (!url || !chrome.bookmarks) return;
+  // Find page metadata from histVisits
+  const v = histVisits.find(x => x.url === url);
+  const title = v ? v.title : url;
+  try {
+    // Place new bookmark in "Other Bookmarks" (id "2"); fall back to first child of root
+    let parentId = '2';
+    try { await chrome.bookmarks.getSubTree(parentId); } catch { parentId = ''; }
+    if (!parentId) {
+      const tree = await chrome.bookmarks.getTree();
+      parentId = tree[0]?.children?.[1]?.id || tree[0]?.children?.[0]?.id;
     }
-    const items = [...seen.values()].sort((a, b) => b.count - a.count);
-    legendWrap.innerHTML = `
-      <div class="hist-legend-title">类别图例</div>
-      <div class="hist-legend-grid">
-        ${items.map(it => `
-          <div class="hist-legend-item">
-            <span class="hist-legend-swatch" style="background:${HIST_CAT_COLOR[it.cls]}"></span>
-            <span class="hist-legend-label">${escapeHtml(it.label)}</span>
-            <span class="hist-legend-count">${it.count.toLocaleString()}</span>
-          </div>
-        `).join('')}
-      </div>
-    `;
+    if (!parentId) throw new Error('找不到「其他书签」目录');
+    await chrome.bookmarks.create({ parentId, title, url });
+    if (btnEl) {
+      btnEl.classList.add('is-done');
+      btnEl.textContent = '✓';
+      btnEl.disabled = true;
+      btnEl.title = '已收藏';
+    }
+    showToast?.('已加入 Chrome 书签');
+    // Bookmark cache may be stale next time user opens 整理收藏夹; mark invalidated
+    bmLoaded = false;
+  } catch (err) {
+    showToast?.('收藏失败: ' + (err.message || err));
+    console.warn('[tab-out] bookmark page failed', err);
   }
 }
 
 async function renderHistoryInsights() {
+  const status = document.getElementById('histStatus');
   if (!histItems.length) {
-    const status = document.getElementById('histStatus');
     if (status) status.textContent = '这个时段没有浏览记录。';
-    ['histStats', 'histClock', 'histPeakList', 'histClockLegend', 'histCategories', 'histDomains', 'histPages']
+    ['histStats', 'histClock', 'histPeakList', 'histDomains', 'histPages']
       .forEach(id => { const el = document.getElementById(id); if (el) el.innerHTML = ''; });
+    document.getElementById('histFilterChips').style.display = 'none';
     return;
   }
-  renderHistStats();
-  renderHistCategories();
+  // First render with what we have (no per-visit detail yet)
+  renderHistFilterChips();
   renderHistTopDomains();
   renderHistTopPages();
-  // Clock requires async getVisits — kicks off, renders when done
-  const grid = await loadHistClockData();
-  renderHistClock(grid);
+  // Build raw visit list — needed for heatmap and accurate filtering
+  await loadHistVisits();
+  // Now re-render with full data
+  renderHistStats();
+  renderHistHeatmap();
+  renderHistTopDomains();
+  renderHistTopPages();
 }
 
 document.getElementById('histRefresh')?.addEventListener('click', () => {
   histLoaded = false;
+  histFilter = { cell: null, domain: null };
   loadHistoryInsights();
 });
 
 document.getElementById('histWindow')?.addEventListener('change', (e) => {
   histWindowDays = parseInt(e.target.value, 10) || 30;
   histLoaded = false;
+  histFilter = { cell: null, domain: null };
   loadHistoryInsights();
+});
+
+/* ---- Heatmap click → drill down into a DOW × hour cell ---- */
+document.getElementById('histClock')?.addEventListener('click', (e) => {
+  const cell = e.target.closest('.hist-hm-cell');
+  if (!cell) return;
+  const dow  = parseInt(cell.dataset.dow, 10);
+  const hour = parseInt(cell.dataset.hour, 10);
+  if (isNaN(dow) || isNaN(hour)) return;
+  // Toggle off if already active
+  if (histFilter.cell && histFilter.cell.dow === dow && histFilter.cell.hour === hour) {
+    setHistFilter({ cell: null });
+  } else {
+    setHistFilter({ cell: { dow, hour } });
+  }
+});
+
+/* ---- Top-3 peak list → also acts as cell filter ---- */
+document.getElementById('histPeakList')?.addEventListener('click', (e) => {
+  const item = e.target.closest('.hist-peak-item');
+  if (!item) return;
+  const dow  = parseInt(item.dataset.dow, 10);
+  const hour = parseInt(item.dataset.hour, 10);
+  if (isNaN(dow) || isNaN(hour)) return;
+  setHistFilter({ cell: { dow, hour } });
+});
+
+/* ---- Domain row click → filter pages to that domain ---- */
+document.getElementById('histDomains')?.addEventListener('click', (e) => {
+  const row = e.target.closest('.hist-domain-row');
+  if (!row) return;
+  const domain = row.dataset.domain;
+  if (!domain) return;
+  if (histFilter.domain === domain) {
+    setHistFilter({ domain: null });
+  } else {
+    setHistFilter({ domain });
+  }
+});
+
+/* ---- Page row: click bookmark button → save to chrome.bookmarks ---- */
+document.getElementById('histPages')?.addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-bm-action="bookmark-page"]');
+  if (!btn) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const row = btn.closest('.hist-page-row');
+  if (!row) return;
+  bookmarkHistPage(row.dataset.url, btn);
+});
+
+/* ---- Filter chips: clear ---- */
+document.getElementById('histFilterChips')?.addEventListener('click', (e) => {
+  const target = e.target.closest('[data-clear]');
+  if (!target) return;
+  const what = target.dataset.clear;
+  if (what === 'all')    clearHistFilter();
+  if (what === 'cell')   setHistFilter({ cell: null });
+  if (what === 'domain') setHistFilter({ domain: null });
 });
 
 
@@ -2961,7 +3152,6 @@ function setActiveView(view) {
     p.classList.toggle('is-active', p.dataset.view === view);
   });
   if (view === 'bookmarks' && !bmLoaded) loadBookmarks();
-  if (view === 'insights' && !insLoaded) loadInsights();
   if (view === 'history' && !histLoaded) loadHistoryInsights();
 }
 
