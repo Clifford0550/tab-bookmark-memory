@@ -11,7 +11,7 @@
 
   <link rel="stylesheet" href="style.css">
 </head>
-<body>
+<body data-view="tabs">
 <div class="container">
 
 
@@ -47,12 +47,22 @@
   </div>
 
   <!-- ================================================================
+       VIEW TABS — switch between "Open Tabs" dashboard and Bookmarks
+       ================================================================ -->
+  <nav class="view-tabs" id="viewTabs">
+    <button class="view-tab is-active" data-view="tabs">浏览器标签</button>
+    <button class="view-tab" data-view="bookmarks">整理收藏夹</button>
+    <button class="view-tab" data-view="insights">时间洞察</button>
+    <button class="view-tab" data-view="history">近期足迹</button>
+  </nav>
+
+  <!-- ================================================================
        MAIN CONTENT AREA — two-column layout
        Left: open tabs (domain/mission cards)
        Right: saved for later checklist
        The right column only renders when it has items (JS controls this)
        ================================================================ -->
-  <div class="dashboard-columns" id="dashboardColumns">
+  <div class="dashboard-columns view-pane is-active" id="dashboardColumns" data-view="tabs">
 
     <!-- LEFT COLUMN: Open tabs -->
     <div class="active-section" id="openTabsSection" style="display:none">
@@ -97,6 +107,162 @@
   </div><!-- end .dashboard-columns -->
 
   <!-- ================================================================
+       整理收藏夹 — Chrome bookmarks organizer
+       Lives in its own view tab; app.js loads on first switch.
+       ================================================================ -->
+  <div class="bm-section view-pane" id="bmSection" data-view="bookmarks">
+    <div class="section-header">
+      <h2>整理收藏夹</h2>
+      <div class="section-line"></div>
+      <div class="section-count" id="bmCount"></div>
+      <button class="bm-refresh" id="bmRefresh" title="刷新">↻</button>
+    </div>
+
+    <!-- Toolbar: filters + sort + folder filter -->
+    <div class="bm-toolbar">
+      <button class="bm-filter is-active" data-filter="all">全部 <span class="bm-pill" id="bmAllCount"></span></button>
+      <button class="bm-filter" data-filter="duplicates">重复 <span class="bm-pill" id="bmDupCount"></span></button>
+      <button class="bm-filter" data-filter="dead">失效 <span class="bm-pill" id="bmDeadCount"></span></button>
+      <button class="bm-filter age-pill age-tier-1y" data-filter="age-1y">1 年+ <span class="bm-pill" id="bmAge1yCount"></span></button>
+      <button class="bm-filter age-pill age-tier-2y" data-filter="age-2y">2 年+ <span class="bm-pill" id="bmAge2yCount"></span></button>
+      <button class="bm-filter age-pill age-tier-3y" data-filter="age-3y">3 年+ <span class="bm-pill" id="bmAge3yCount"></span></button>
+      <button class="bm-filter" data-filter="empty-folders">空文件夹 <span class="bm-pill" id="bmEmptyCount"></span></button>
+
+      <div class="bm-spacer"></div>
+
+      <select class="bm-select" id="bmSort" title="排序">
+        <option value="folder">按文件夹</option>
+        <option value="date-desc">最新优先</option>
+        <option value="date-asc">最老优先</option>
+        <option value="domain">按域名</option>
+      </select>
+      <select class="bm-select" id="bmFolderFilter" title="文件夹筛选">
+        <option value="">全部文件夹</option>
+      </select>
+      <button class="bm-bulk" id="bmDedupeBtn" title="每组重复保留最早一条，删其余" style="display:none">
+        一键去重
+      </button>
+      <button class="bm-bulk" id="bmClearEmptyBtn" title="删除所有空文件夹（含递归空的）" style="display:none">
+        一键清空空文件夹
+      </button>
+    </div>
+
+    <!-- Selection action bar — appears when 1+ items checked -->
+    <div class="bm-selection-bar" id="bmSelectionBar" style="display:none">
+      <span class="bm-sel-count" id="bmSelCount">已选 0 项</span>
+      <button class="bm-sel-clear" id="bmSelClear" title="清除选择">清除</button>
+      <div class="bm-sel-spacer"></div>
+      <select class="bm-select" id="bmBulkMoveSelect" title="批量移动到文件夹">
+        <option value="">批量移动到…</option>
+      </select>
+      <button class="bm-bulk" id="bmBulkDeleteBtn">删除选中</button>
+    </div>
+
+    <!-- Folder TOC — sticky horizontal pill nav, only visible when sort=folder -->
+    <nav class="bm-folder-nav" id="bmFolderNav" style="display:none"></nav>
+
+    <div class="bm-list" id="bmList"></div>
+    <div class="bm-status" id="bmStatus"></div>
+  </div>
+
+  <!-- ================================================================
+       时间洞察 — Timeline insights (buckets bookmarks by 6mo windows)
+       ================================================================ -->
+  <div class="ins-section view-pane" id="insSection" data-view="insights">
+    <div class="section-header">
+      <h2>时间洞察</h2>
+      <div class="section-line"></div>
+      <div class="section-count" id="insCount"></div>
+      <button class="bm-refresh" id="insRefresh" title="刷新">↻</button>
+    </div>
+
+    <div class="ins-controls">
+      <span class="ins-controls-label">时间窗口</span>
+      <select class="bm-select" id="insWindow">
+        <option value="3">3 个月</option>
+        <option value="6" selected>6 个月</option>
+        <option value="12">12 个月</option>
+      </select>
+      <span class="ins-controls-hint">看你某段时间在关注什么 — 域名集中度 + 标题关键词 + 月度密度</span>
+    </div>
+
+    <div class="ins-list" id="insList"></div>
+    <div class="ins-status" id="insStatus"></div>
+  </div>
+
+  <!-- ================================================================
+       近期足迹 — Browser History insights (last N days)
+       ================================================================ -->
+  <div class="hist-section view-pane" id="histSection" data-view="history">
+    <div class="section-header">
+      <h2>近期足迹</h2>
+      <div class="section-line"></div>
+      <div class="section-count" id="histCount"></div>
+      <button class="bm-refresh" id="histRefresh" title="刷新">↻</button>
+    </div>
+
+    <div class="ins-controls">
+      <span class="ins-controls-label">时间窗口</span>
+      <select class="bm-select" id="histWindow">
+        <option value="1">最近 24 小时</option>
+        <option value="3">最近 3 天</option>
+        <option value="7" selected>最近 7 天</option>
+        <option value="30">最近 30 天</option>
+        <option value="90">最近 90 天</option>
+      </select>
+      <span class="ins-controls-hint">从浏览器历史里看你最近真正在花时间看什么</span>
+    </div>
+
+    <!-- Top stats strip -->
+    <section class="hist-stats" id="histStats"></section>
+
+    <!-- 24-hour activity timeline (vertical bars) -->
+    <section class="hist-block">
+      <div class="hist-block-head">
+        <h3>一天的时间轴</h3>
+        <span class="hist-block-hint">每小时一根柱，高度 = 访问量，颜色叠加 = 类别构成</span>
+      </div>
+      <div class="hist-clock-wrap">
+        <div class="hist-clock-status" id="histClockStatus"></div>
+        <div class="hist-clock-svg" id="histClock"></div>
+        <div class="hist-clock-side">
+          <div class="hist-peak-list" id="histPeakList"></div>
+          <div class="hist-clock-legend" id="histClockLegend"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Category breakdown -->
+    <section class="hist-block">
+      <div class="hist-block-head">
+        <h3>类别分布</h3>
+        <span class="hist-block-hint">按访问次数分配</span>
+      </div>
+      <div class="hist-categories" id="histCategories"></div>
+    </section>
+
+    <!-- Top domains -->
+    <section class="hist-block">
+      <div class="hist-block-head">
+        <h3>高频域名</h3>
+        <span class="hist-block-hint">这段时间访问最多的网站</span>
+      </div>
+      <div class="hist-domains" id="histDomains"></div>
+    </section>
+
+    <!-- Top pages -->
+    <section class="hist-block">
+      <div class="hist-block-head">
+        <h3>高频页面</h3>
+        <span class="hist-block-hint">具体页面访问次数排名</span>
+      </div>
+      <div class="hist-pages" id="histPages"></div>
+    </section>
+
+    <div class="hist-status" id="histStatus"></div>
+  </div>
+
+  <!-- ================================================================
        FOOTER — global stats + refresh control
        ================================================================ -->
   <footer>
@@ -107,7 +273,8 @@
       </div>
     </div>
     <div class="last-refresh">
-      <span style="color: var(--muted); font-size: 11px;"><a href="https://github.com/zarazhangrui/tab-out" target="_top" style="color: var(--muted); text-decoration: underline; text-underline-offset: 2px;">Tab Out</a> by <a href="https://x.com/zarazhangrui" target="_top" style="color: var(--muted); text-decoration: underline; text-underline-offset: 2px;">Zara</a></span>
+      <span class="credit credit-tabs" style="color: var(--muted); font-size: 11px;"><a href="https://github.com/zarazhangrui/tab-out" target="_top" style="color: var(--muted); text-decoration: underline; text-underline-offset: 2px;">Tab Out</a> by <a href="https://x.com/zarazhangrui" target="_top" style="color: var(--muted); text-decoration: underline; text-underline-offset: 2px;">Zara</a></span>
+      <span class="credit credit-other" style="color: var(--muted); font-size: 11px;">by <a href="https://www.xiaohongshu.com/user/profile/654a536a000000000400a77e" target="_top" style="color: var(--muted); text-decoration: underline; text-underline-offset: 2px;">饼饼几</a></span>
     </div>
   </footer>
 

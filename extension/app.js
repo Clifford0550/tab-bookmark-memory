@@ -1477,6 +1477,1502 @@ document.addEventListener('input', async (e) => {
 
 
 /* ----------------------------------------------------------------
+   SHARED HELPERS
+   ---------------------------------------------------------------- */
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+
+
+/* ================================================================
+   整理收藏夹 — Chrome Bookmarks Organizer
+
+   Reads chrome.bookmarks tree, flags duplicates / dead / stale
+   items, and lets the user delete or move bookmarks. All mutations
+   go through chrome.bookmarks.* — no separate storage layer.
+   ================================================================ */
+
+const BM_STALE_MS = 365 * 24 * 3600 * 1000;         // 1 year — older than this gets darker visual treatment
+const BM_DEAD_TIMEOUT_MS = 6000;
+const BM_DEAD_CONCURRENCY = 6;
+
+let bmFlat = [];                  // [{id,title,url,parentId,folderPath,dateAdded,normUrl}]
+let bmFolders = [];               // [{id,title,path}] — for filter + move menu
+let bmFolderMeta = new Map();     // id -> {id,title,path,parentId,bookmarkCount,childFolderIds}
+let bmDupGroups = new Map();      // normUrl -> [bmId, ...]
+let bmDeadIds = new Set();        // ids that failed reachability check
+let bmLoaded = false;
+let bmFilter = 'all';
+let bmSort = 'folder';
+let bmFolderFilterId = '';
+let bmSelected = new Set();
+let bmCollapsedGroups = new Set();
+
+function normalizeBmUrl(url) {
+  try {
+    const u = new URL(url);
+    if (!/^https?:$/.test(u.protocol)) return url.toLowerCase();
+    let host = u.hostname.toLowerCase().replace(/^www\./, '');
+    let path = u.pathname.replace(/\/+$/, '') || '/';
+    const cleanedParams = [];
+    for (const [k, v] of u.searchParams) {
+      if (/^utm_/i.test(k) || k === 'fbclid' || k === 'gclid' || k === 'ref' || k === 'ref_src') continue;
+      cleanedParams.push([k, v]);
+    }
+    cleanedParams.sort((a, b) => a[0].localeCompare(b[0]));
+    const qs = cleanedParams.map(([k, v]) => `${k}=${v}`).join('&');
+    return `${host}${path}${qs ? '?' + qs : ''}`;
+  } catch {
+    return String(url || '').toLowerCase();
+  }
+}
+
+function flattenBookmarkTree(tree) {
+  const flat = [];
+  const folders = [];
+  const folderMeta = new Map();
+  function walk(node, pathParts) {
+    if (!node) return 0;
+    if (node.url) {
+      const norm = normalizeBmUrl(node.url);
+      flat.push({
+        id:         node.id,
+        title:      node.title || '',
+        url:        node.url,
+        parentId:   node.parentId,
+        folderPath: pathParts.join(' / '),
+        dateAdded:  node.dateAdded || 0,
+        normUrl:    norm,
+      });
+      return 1;
+    }
+    // Skip the synthetic root node (no parentId)
+    const isRoot = !node.parentId;
+    const nextPath = isRoot ? pathParts : [...pathParts, node.title || '(未命名)'];
+    let bookmarkCount = 0;
+    const childFolderIds = [];
+    for (const child of (node.children || [])) {
+      bookmarkCount += walk(child, nextPath);
+      if (!child.url) childFolderIds.push(child.id);
+    }
+    if (!isRoot && node.id) {
+      const folderObj = {
+        id: node.id,
+        title: node.title || '(未命名)',
+        path: nextPath.join(' / '),
+        parentId: node.parentId,
+        bookmarkCount,
+        childFolderIds,
+      };
+      folders.push({ id: folderObj.id, title: folderObj.title, path: folderObj.path });
+      folderMeta.set(node.id, folderObj);
+    }
+    return bookmarkCount;
+  }
+  (tree || []).forEach(root => walk(root, []));
+  return { flat, folders, folderMeta };
+}
+
+// Chrome's top-level system folders (Bookmarks bar / Other / Mobile) sit
+// directly under the synthetic root and shouldn't be deletable.
+function isSystemRootFolder(meta) {
+  return !meta?.parentId || meta.parentId === '0';
+}
+
+function getEmptyFolders() {
+  return [...bmFolderMeta.values()]
+    .filter(f => f.bookmarkCount === 0 && !isSystemRootFolder(f));
+}
+
+// Topmost empty folders only — if A is empty and contains empty B,
+// removing A removes B too, so we only delete A.
+function getTopmostEmptyFolders() {
+  const empty = getEmptyFolders();
+  const emptyIds = new Set(empty.map(f => f.id));
+  return empty.filter(f => !emptyIds.has(f.parentId));
+}
+
+function findDuplicateGroups(items) {
+  const map = new Map();
+  for (const b of items) {
+    if (!b.url || !/^https?:/i.test(b.url)) continue;
+    if (!map.has(b.normUrl)) map.set(b.normUrl, []);
+    map.get(b.normUrl).push(b.id);
+  }
+  return new Map([...map].filter(([, v]) => v.length > 1));
+}
+
+// Age tier: 'fresh' | 'tier-1y' (1-2y) | 'tier-2y' (2-3y) | 'tier-3y' (3y+)
+const BM_YEAR_MS = 365 * 86400000;
+function bmAgeTier(b) {
+  if (!b.dateAdded) return 'fresh';
+  const age = Date.now() - b.dateAdded;
+  if (age < BM_YEAR_MS) return 'fresh';
+  if (age < 2 * BM_YEAR_MS) return 'tier-1y';
+  if (age < 3 * BM_YEAR_MS) return 'tier-2y';
+  return 'tier-3y';
+}
+function bmIsStale(b)      { return bmAgeTier(b) !== 'fresh'; }
+function bmIsDuplicate(b)  { return bmDupGroups.has(b.normUrl); }
+function bmIsDead(b)       { return bmDeadIds.has(b.id); }
+
+// Domain-category dictionary — drives the colored category pill on each card.
+// Match against eTLD+1 host with leading "www." stripped. Order matters
+// only for ambiguous overlaps (none currently).
+const BM_CATEGORIES = [
+  { label: '视频', cls: 'cat-video', hosts: [
+    'bilibili.com','b23.tv','biligame.com','youtube.com','youtu.be','vimeo.com',
+    'douyin.com','ixigua.com','iqiyi.com','v.qq.com','tv.cctv.com','xiaoyuzhoufm.com',
+  ]},
+  { label: '代码', cls: 'cat-code', hosts: [
+    'github.com','gitlab.com','gitee.com','stackoverflow.com','stackexchange.com',
+    'npmjs.com','crates.io','pypi.org','developer.mozilla.org','mdn.dev',
+    'codepen.io','codesandbox.io','replit.com','jsfiddle.net','dev.to',
+  ]},
+  { label: 'AI', cls: 'cat-ai', hosts: [
+    'openai.com','anthropic.com','claude.ai','chatgpt.com','huggingface.co',
+    'replicate.com','midjourney.com','civitai.com','runwayml.com','perplexity.ai',
+  ]},
+  { label: '资讯', cls: 'cat-news', hosts: [
+    'zhihu.com','twitter.com','x.com','weibo.com','reddit.com','news.ycombinator.com',
+    '36kr.com','huxiu.com','sspai.com','jiqizhixin.com','medium.com','substack.com',
+  ]},
+  { label: '设计', cls: 'cat-design', hosts: [
+    'figma.com','dribbble.com','behance.net','pinterest.com','miro.com',
+    'excalidraw.com','canva.com','sketch.com',
+  ]},
+  { label: '学习', cls: 'cat-learn', hosts: [
+    'coursera.org','udemy.com','edx.org','leetcode.com','leetcode.cn','khanacademy.org',
+    'mooc.org','school365.com','imooc.com',
+  ]},
+  { label: '购物', cls: 'cat-shop', hosts: [
+    'taobao.com','tmall.com','jd.com','pinduoduo.com','amazon.com','amazon.cn',
+    'smzdm.com','xianyu.taobao.com','dewu.com',
+  ]},
+  { label: '协作', cls: 'cat-tool', hosts: [
+    'notion.so','notion.com','airtable.com','asana.com','trello.com','slack.com',
+    'linear.app','feishu.cn','larksuite.com','dingtalk.com',
+  ]},
+];
+
+function bmCategoryFor(url) {
+  try {
+    const host = new URL(url).hostname.toLowerCase().replace(/^www\./, '');
+    for (const cat of BM_CATEGORIES) {
+      if (cat.hosts.some(h => host === h || host.endsWith('.' + h))) return cat;
+    }
+    return null;
+  } catch { return null; }
+}
+
+// Age tiers — used for visual emphasis. > 1 year = "老" (darker card).
+const BM_ONE_YEAR = 365 * 86400000;
+function bmAgeYears(b) {
+  if (!b.dateAdded) return 0;
+  return (Date.now() - b.dateAdded) / BM_ONE_YEAR;
+}
+
+function applyBmFilter(items) {
+  let out = items;
+  if (bmFolderFilterId) {
+    out = out.filter(b => b.parentId === bmFolderFilterId);
+  }
+  switch (bmFilter) {
+    case 'duplicates': out = out.filter(bmIsDuplicate); break;
+    case 'dead':       out = out.filter(bmIsDead); break;
+    case 'age-1y':     out = out.filter(b => { const t = bmAgeTier(b); return t === 'tier-1y' || t === 'tier-2y' || t === 'tier-3y'; }); break;
+    case 'age-2y':     out = out.filter(b => { const t = bmAgeTier(b); return t === 'tier-2y' || t === 'tier-3y'; }); break;
+    case 'age-3y':     out = out.filter(b => bmAgeTier(b) === 'tier-3y'); break;
+  }
+  return out;
+}
+
+function applyBmSort(items) {
+  const arr = items.slice();
+  switch (bmSort) {
+    case 'date-desc':
+      arr.sort((a, b) => b.dateAdded - a.dateAdded); break;
+    case 'date-asc':
+      arr.sort((a, b) => a.dateAdded - b.dateAdded); break;
+    case 'domain':
+      arr.sort((a, b) => {
+        const da = (() => { try { return new URL(a.url).hostname.replace(/^www\./, ''); } catch { return ''; } })();
+        const db = (() => { try { return new URL(b.url).hostname.replace(/^www\./, ''); } catch { return ''; } })();
+        return da.localeCompare(db) || (b.dateAdded - a.dateAdded);
+      });
+      break;
+    case 'folder':
+    default:
+      arr.sort((a, b) => a.folderPath.localeCompare(b.folderPath) || (b.dateAdded - a.dateAdded));
+      break;
+  }
+  return arr;
+}
+
+function bmFaviconUrl(url) {
+  try {
+    const u = new URL(url);
+    return `https://www.google.com/s2/favicons?domain=${u.hostname}&sz=32`;
+  } catch { return ''; }
+}
+
+function bmDomain(url) {
+  try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; }
+}
+
+function renderBmRow(b) {
+  const dup   = bmIsDuplicate(b);
+  const dead  = bmIsDead(b);
+  const tier  = bmAgeTier(b);                  // 'fresh' | 'tier-1y' | 'tier-2y' | 'tier-3y'
+  const ageYears = bmAgeYears(b);
+  const cat = bmCategoryFor(b.url);
+
+  const tags = [];
+  if (cat)   tags.push(`<span class="bm-tag bm-cat ${cat.cls}">${escapeHtml(cat.label)}</span>`);
+  if (dup)   tags.push('<span class="bm-tag is-dup">重复</span>');
+  if (dead)  tags.push('<span class="bm-tag is-dead">失效</span>');
+  if (tier !== 'fresh') {
+    const tierLabel = tier === 'tier-3y' ? '3 年+' : tier === 'tier-2y' ? '2 年+' : '1 年+';
+    tags.push(`<span class="bm-tag age-${tier}">${tierLabel}</span>`);
+  }
+
+  const folderOpts = bmFolders
+    .filter(f => f.id !== b.parentId)
+    .map(f => `<option value="${escapeHtml(f.id)}">${escapeHtml(f.path)}</option>`)
+    .join('');
+  const checked = bmSelected.has(b.id) ? 'checked' : '';
+  const cls = ['bm-row'];
+  if (dup) cls.push('is-dup');
+  if (dead) cls.push('is-dead');
+  if (tier !== 'fresh') cls.push(tier);
+  // Cards are draggable only when grouped by folder (drop target = a folder)
+  const draggable = bmSort === 'folder' ? 'draggable="true"' : '';
+  return `
+    <div class="${cls.join(' ')}" data-bm-id="${escapeHtml(b.id)}" ${draggable}>
+      <input type="checkbox" class="bm-check" data-bm-action="select" ${checked}>
+      <button class="bm-delete" data-bm-action="delete" title="删除">×</button>
+      <a class="bm-title-link" href="${escapeHtml(b.url)}" target="_blank" rel="noopener" draggable="false" title="${escapeHtml(b.title || b.url)}">
+        <img class="bm-favicon" src="${escapeHtml(bmFaviconUrl(b.url))}" alt="" loading="lazy" draggable="false">
+        <span class="bm-title">${escapeHtml(b.title || b.url)}</span>
+      </a>
+      <div class="bm-meta">
+        <span class="bm-url">${escapeHtml(bmDomain(b.url) || b.url)}</span>
+        <span class="bm-folder">${escapeHtml(b.folderPath || '(顶层)')}</span>
+        ${tags.join('')}
+      </div>
+      <div class="bm-actions">
+        <select class="bm-move-select" data-bm-action="move" title="移动到文件夹">
+          <option value="">移动到…</option>
+          ${folderOpts}
+        </select>
+      </div>
+    </div>
+  `;
+}
+
+function renderEmptyFolderCard(f) {
+  const childEmpty = (f.childFolderIds || []).filter(id => {
+    const m = bmFolderMeta.get(id);
+    return m && m.bookmarkCount === 0;
+  }).length;
+  const detail = childEmpty > 0
+    ? `空文件夹 · 含 ${childEmpty} 个空子文件夹`
+    : '空文件夹';
+  return `
+    <div class="bm-folder-card" data-folder-id="${escapeHtml(f.id)}">
+      <button class="bm-delete" data-bm-action="delete-folder" title="删除该空文件夹">×</button>
+      <div class="bm-folder-icon">📁</div>
+      <div class="bm-folder-name">${escapeHtml(f.title)}</div>
+      <div class="bm-folder-path">${escapeHtml(f.path)}</div>
+      <div class="bm-folder-detail">${escapeHtml(detail)}</div>
+    </div>
+  `;
+}
+
+function updateBmCounters() {
+  const dupCount = [...bmDupGroups.values()].reduce((s, ids) => s + ids.length, 0);
+  let age1y = 0, age2y = 0, age3y = 0;
+  for (const b of bmFlat) {
+    const t = bmAgeTier(b);
+    if (t === 'tier-3y') { age3y++; age2y++; age1y++; }
+    else if (t === 'tier-2y') { age2y++; age1y++; }
+    else if (t === 'tier-1y') { age1y++; }
+  }
+  const emptyCount = getEmptyFolders().length;
+  const all = bmFlat.length;
+  const dead = bmDeadIds.size;
+  const set = (id, n) => { const el = document.getElementById(id); if (el) el.textContent = n ? n : ''; };
+  set('bmAllCount', all);
+  set('bmDupCount', dupCount);
+  set('bmDeadCount', dead);
+  set('bmAge1yCount', age1y);
+  set('bmAge2yCount', age2y);
+  set('bmAge3yCount', age3y);
+  set('bmEmptyCount', emptyCount);
+  const total = document.getElementById('bmCount');
+  if (total) total.textContent = all ? `${all} 条` : '';
+  const dedupeBtn = document.getElementById('bmDedupeBtn');
+  if (dedupeBtn) dedupeBtn.style.display = bmFilter === 'duplicates' && bmDupGroups.size > 0 ? '' : 'none';
+  const clearEmptyBtn = document.getElementById('bmClearEmptyBtn');
+  if (clearEmptyBtn) clearEmptyBtn.style.display = bmFilter === 'empty-folders' && emptyCount > 0 ? '' : 'none';
+}
+
+// Stable, URL-safe anchor id from a folder path
+function bmAnchorIdFor(path) {
+  return 'bm-g-' + Array.from(path).reduce((h, ch) => ((h << 5) - h + ch.charCodeAt(0)) | 0, 0).toString(36).replace('-', 'n');
+}
+
+function renderBmFolderNav(groupOrder) {
+  const nav = document.getElementById('bmFolderNav');
+  if (!nav) return;
+  if (!groupOrder || !groupOrder.length) {
+    nav.style.display = 'none';
+    nav.innerHTML = '';
+    return;
+  }
+  nav.style.display = 'flex';
+  nav.innerHTML = groupOrder.map(([path, items]) => {
+    const id = bmAnchorIdFor(path);
+    // Pills are drop targets only when grouped by folder
+    const parentId = bmSort === 'folder' ? (items[0]?.parentId || '') : '';
+    return `<a class="bm-folder-pill" href="#${id}" data-anchor="${id}" data-parent-id="${escapeHtml(parentId)}" title="${escapeHtml(path)}">
+      <span class="bm-folder-pill-name">${escapeHtml(path.split(' / ').pop())}</span>
+      <span class="bm-folder-pill-count">${items.length}</span>
+    </a>`;
+  }).join('');
+}
+
+let bmGroupObserver = null;
+function observeBmGroups() {
+  if (bmGroupObserver) bmGroupObserver.disconnect();
+  const groups = document.querySelectorAll('.bm-group[id]');
+  if (!groups.length) return;
+  bmGroupObserver = new IntersectionObserver((entries) => {
+    // Pick the topmost intersecting group as "active"
+    const visible = entries
+      .filter(e => e.isIntersecting)
+      .map(e => ({ id: e.target.id, top: e.target.getBoundingClientRect().top }))
+      .sort((a, b) => a.top - b.top);
+    if (!visible.length) return;
+    const activeId = visible[0].id;
+    document.querySelectorAll('.bm-folder-pill').forEach(p => {
+      p.classList.toggle('is-active', p.dataset.anchor === activeId);
+    });
+  }, { rootMargin: '-90px 0px -65% 0px', threshold: 0 });
+  groups.forEach(g => bmGroupObserver.observe(g));
+}
+
+function renderBmList() {
+  const list = document.getElementById('bmList');
+  const status = document.getElementById('bmStatus');
+  if (!list) return;
+
+  // Special mode: show empty folders, not bookmarks
+  if (bmFilter === 'empty-folders') {
+    const empties = getEmptyFolders();
+    list.classList.add('is-folder-mode');
+    list.classList.remove('is-grouped');
+    renderBmFolderNav(null);
+    if (!empties.length) {
+      list.innerHTML = '<div class="bm-empty">没有空文件夹，干净。</div>';
+    } else {
+      empties.sort((a, b) => (b.path.split('/').length) - (a.path.split('/').length));
+      list.innerHTML = empties.map(renderEmptyFolderCard).join('');
+    }
+    if (status) status.textContent = '';
+    updateBmCounters();
+    updateBmSelectionUI();
+    return;
+  }
+  list.classList.remove('is-folder-mode');
+
+  const visible = applyBmSort(applyBmFilter(bmFlat));
+  const isGrouped = bmSort === 'folder' || bmSort === 'domain';
+  if (!visible.length) {
+    const empty = bmFlat.length === 0 ? '没有读取到任何书签。' : '当前过滤条件下没有书签。';
+    list.innerHTML = `<div class="bm-empty">${empty}</div>`;
+    list.classList.remove('is-grouped');
+    renderBmFolderNav(null);
+  } else if (isGrouped) {
+    list.classList.add('is-grouped');
+    // Pick grouping key based on sort
+    const keyFn = bmSort === 'folder'
+      ? b => b.folderPath || '(顶层)'
+      : b => bmDomain(b.url) || '(无域名)';
+    const groups = new Map();
+    for (const b of visible) {
+      const key = keyFn(b);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(b);
+    }
+    // Order groups by count desc (largest folder/domain first) for both modes
+    const groupOrder = [...groups].sort((a, b) => b[1].length - a[1].length);
+    list.innerHTML = groupOrder.map(([key, items]) => {
+      const collapsed = bmCollapsedGroups.has(key) ? ' is-collapsed' : '';
+      const allChecked = items.every(b => bmSelected.has(b.id));
+      const someChecked = !allChecked && items.some(b => bmSelected.has(b.id));
+      const id = bmAnchorIdFor(key);
+      // For folder-grouping, parentId comes from any item (they all share it).
+      // For domain-grouping, no parent (drop disabled — different folders may share a domain).
+      const parentId = bmSort === 'folder' ? (items[0]?.parentId || '') : '';
+      return `
+        <div class="bm-group${collapsed}" data-group-key="${escapeHtml(key)}" data-parent-id="${escapeHtml(parentId)}" id="${id}">
+          <div class="bm-group-header">
+            <input type="checkbox" class="bm-group-check" data-bm-action="select-group"
+                   ${allChecked ? 'checked' : ''}
+                   ${someChecked ? 'data-indeterminate="1"' : ''}>
+            <span class="bm-group-chevron">▼</span>
+            <span class="bm-group-title">${escapeHtml(key)}</span>
+            <span class="bm-group-count">${items.length}</span>
+          </div>
+          <div class="bm-group-body">
+            ${items.map(renderBmRow).join('')}
+          </div>
+        </div>
+      `;
+    }).join('');
+    list.querySelectorAll('.bm-group-check[data-indeterminate]').forEach(cb => { cb.indeterminate = true; });
+    renderBmFolderNav(groupOrder);
+    requestAnimationFrame(observeBmGroups);
+  } else {
+    list.classList.remove('is-grouped');
+    list.innerHTML = visible.map(renderBmRow).join('');
+    renderBmFolderNav(null);
+  }
+  if (status) status.textContent = '';
+  updateBmCounters();
+  updateBmSelectionUI();
+}
+
+function updateBmSelectionUI() {
+  const bar = document.getElementById('bmSelectionBar');
+  const count = document.getElementById('bmSelCount');
+  if (!bar) return;
+  const n = bmSelected.size;
+  bar.style.display = n > 0 ? '' : 'none';
+  if (count) count.textContent = `已选 ${n} 项`;
+  // Refresh bulk-move dropdown options (folders may have changed)
+  const sel = document.getElementById('bmBulkMoveSelect');
+  if (sel && n > 0) {
+    sel.innerHTML = '<option value="">批量移动到…</option>' +
+      bmFolders.map(f => `<option value="${escapeHtml(f.id)}">${escapeHtml(f.path)}</option>`).join('');
+  }
+}
+
+function populateBmFolderFilter() {
+  const sel = document.getElementById('bmFolderFilter');
+  if (!sel) return;
+  const opts = ['<option value="">全部文件夹</option>']
+    .concat(bmFolders.map(f => `<option value="${escapeHtml(f.id)}">${escapeHtml(f.path)}</option>`));
+  sel.innerHTML = opts.join('');
+  sel.value = bmFolderFilterId;
+}
+
+async function loadBookmarks() {
+  const status = document.getElementById('bmStatus');
+  const list   = document.getElementById('bmList');
+  if (!list) return;
+  if (status) status.textContent = '正在读取书签…';
+  list.innerHTML = '';
+
+  try {
+    if (!chrome.bookmarks) throw new Error('chrome.bookmarks API 不可用，请确认扩展已加 bookmarks 权限并重新加载。');
+    const tree = await chrome.bookmarks.getTree();
+    const { flat, folders, folderMeta } = flattenBookmarkTree(tree);
+    bmFlat = flat;
+    bmFolders = folders;
+    bmFolderMeta = folderMeta;
+    bmDupGroups = findDuplicateGroups(bmFlat);
+    bmDeadIds = new Set();
+    populateBmFolderFilter();
+    renderBmList();
+    bmLoaded = true;
+    detectDeadLinksInBackground();
+  } catch (err) {
+    if (status) status.innerHTML = `<div class="bm-error">读取失败: ${escapeHtml(err.message || String(err))}</div>`;
+    console.warn('[tab-out] bookmarks load failed', err);
+  }
+}
+
+async function checkLinkAlive(url) {
+  // Best-effort reachability — Chrome blocks reading status under no-cors,
+  // so we treat "fetch resolves" as alive and "fetch throws" as dead.
+  // DNS failures, total connection refusals, and timeouts all throw.
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), BM_DEAD_TIMEOUT_MS);
+  try {
+    await fetch(url, { method: 'HEAD', mode: 'no-cors', redirect: 'follow', signal: ctrl.signal, cache: 'no-store' });
+    return true;
+  } catch {
+    try {
+      await fetch(url, { method: 'GET', mode: 'no-cors', redirect: 'follow', signal: ctrl.signal, cache: 'no-store' });
+      return true;
+    } catch {
+      return false;
+    }
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+let bmDeadDetectionToken = 0;
+async function detectDeadLinksInBackground() {
+  const myToken = ++bmDeadDetectionToken;
+  const targets = bmFlat.filter(b => /^https?:/i.test(b.url));
+  let cursor = 0;
+  let anyChanged = false;
+
+  async function worker() {
+    while (cursor < targets.length) {
+      if (myToken !== bmDeadDetectionToken) return;
+      const b = targets[cursor++];
+      const alive = await checkLinkAlive(b.url);
+      if (myToken !== bmDeadDetectionToken) return;
+      if (!alive) {
+        bmDeadIds.add(b.id);
+        anyChanged = true;
+        // Annotate the row in place if it's currently rendered
+        const row = document.querySelector(`.bm-row[data-bm-id="${CSS.escape(b.id)}"]`);
+        if (row && !row.classList.contains('is-dead')) {
+          row.classList.add('is-dead');
+          const meta = row.querySelector('.bm-meta');
+          if (meta && !meta.querySelector('.bm-tag.is-dead')) {
+            meta.insertAdjacentHTML('beforeend', '<span class="bm-tag is-dead">失效</span>');
+          }
+        }
+      }
+    }
+  }
+
+  const workers = Array.from({ length: BM_DEAD_CONCURRENCY }, worker);
+  await Promise.all(workers);
+  if (myToken === bmDeadDetectionToken && anyChanged) {
+    updateBmCounters();
+    if (bmFilter === 'dead') renderBmList();
+  }
+}
+
+async function deleteBookmark(id, rowEl) {
+  if (!id) return;
+  try {
+    await chrome.bookmarks.remove(id);
+    const r = rowEl?.getBoundingClientRect();
+    if (r) {
+      playCloseSound?.();
+      shootConfetti?.(r.left + r.width / 2, r.top + r.height / 2);
+    }
+    if (rowEl && typeof animateCardOut === 'function') animateCardOut(rowEl);
+    else rowEl?.remove();
+
+    // Update in-memory state without a full reload
+    const removed = bmFlat.find(b => b.id === id);
+    bmFlat = bmFlat.filter(b => b.id !== id);
+    bmDeadIds.delete(id);
+    if (removed) {
+      bmDupGroups = findDuplicateGroups(bmFlat);
+    }
+    updateBmCounters();
+  } catch (err) {
+    showToast?.('删除失败: ' + (err.message || err));
+    console.warn('[tab-out] bookmark remove failed', err);
+  }
+}
+
+async function moveBookmark(id, parentId, rowEl) {
+  if (!id || !parentId) return;
+  try {
+    await chrome.bookmarks.move(id, { parentId });
+    const folder = bmFolders.find(f => f.id === parentId);
+    showToast?.(`已移动到「${folder ? folder.path : '其他'}」`);
+    const b = bmFlat.find(x => x.id === id);
+    if (b) {
+      b.parentId = parentId;
+      b.folderPath = folder ? folder.path : b.folderPath;
+    }
+    if (rowEl) {
+      const folderEl = rowEl.querySelector('.bm-folder');
+      if (folderEl && folder) folderEl.textContent = folder.path;
+    }
+  } catch (err) {
+    showToast?.('移动失败: ' + (err.message || err));
+    console.warn('[tab-out] bookmark move failed', err);
+  }
+}
+
+async function deleteEmptyFolder(folderId, cardEl) {
+  if (!folderId) return;
+  const meta = bmFolderMeta.get(folderId);
+  if (!meta) return;
+  if (meta.bookmarkCount > 0) {
+    showToast?.('该文件夹包含书签，无法用此功能删除');
+    return;
+  }
+  if (isSystemRootFolder(meta)) {
+    showToast?.('系统根文件夹不能删除');
+    return;
+  }
+  try {
+    await chrome.bookmarks.removeTree(folderId);
+    if (cardEl) {
+      const r = cardEl.getBoundingClientRect();
+      playCloseSound?.();
+      shootConfetti?.(r.left + r.width / 2, r.top + r.height / 2);
+      if (typeof animateCardOut === 'function') animateCardOut(cardEl);
+      else cardEl.remove();
+    }
+    bmFolderMeta.delete(folderId);
+    bmFolders = bmFolders.filter(f => f.id !== folderId);
+    updateBmCounters();
+  } catch (err) {
+    showToast?.('删除失败: ' + (err.message || err));
+    console.warn('[tab-out] removeTree failed', err);
+  }
+}
+
+async function bulkClearEmptyFolders() {
+  const tops = getTopmostEmptyFolders();
+  if (!tops.length) { showToast?.('没有空文件夹'); return; }
+  if (!confirm(`将删除 ${tops.length} 个空文件夹（含递归空的子文件夹）。继续？`)) return;
+  let removed = 0;
+  for (const f of tops) {
+    try { await chrome.bookmarks.removeTree(f.id); removed++; }
+    catch (err) { console.warn('[tab-out] removeTree failed', f.id, err); }
+  }
+  showToast?.(`已删除 ${removed} 个空文件夹`);
+  await loadBookmarks();
+}
+
+async function bulkDeleteSelected() {
+  if (!bmSelected.size) return;
+  const ids = [...bmSelected];
+  if (!confirm(`确认删除选中的 ${ids.length} 条书签？`)) return;
+  let removed = 0;
+  for (const id of ids) {
+    try { await chrome.bookmarks.remove(id); removed++; }
+    catch (err) { console.warn('[tab-out] bulk delete failed for', id, err); }
+  }
+  bmSelected.clear();
+  showToast?.(`已删除 ${removed} 条`);
+  await loadBookmarks();
+}
+
+async function bulkMoveSelected(parentId) {
+  if (!bmSelected.size || !parentId) return;
+  const ids = [...bmSelected];
+  let moved = 0;
+  for (const id of ids) {
+    try { await chrome.bookmarks.move(id, { parentId }); moved++; }
+    catch (err) { console.warn('[tab-out] bulk move failed for', id, err); }
+  }
+  bmSelected.clear();
+  const folder = bmFolders.find(f => f.id === parentId);
+  showToast?.(`已移动 ${moved} 条到「${folder?.path || ''}」`);
+  await loadBookmarks();
+}
+
+async function bulkDedupe() {
+  if (!bmDupGroups.size) return;
+  const toRemove = [];
+  for (const [, ids] of bmDupGroups) {
+    const items = ids.map(id => bmFlat.find(b => b.id === id)).filter(Boolean);
+    if (items.length < 2) continue;
+    items.sort((a, b) => (a.dateAdded || 0) - (b.dateAdded || 0));
+    // Keep the earliest, remove the rest
+    for (let i = 1; i < items.length; i++) toRemove.push(items[i].id);
+  }
+  if (!toRemove.length) return;
+  if (!confirm(`将删除 ${toRemove.length} 条重复书签（每组保留最早一条）。继续？`)) return;
+  for (const id of toRemove) {
+    try { await chrome.bookmarks.remove(id); } catch (err) { console.warn('[tab-out] dedupe remove failed', id, err); }
+  }
+  showToast?.(`已删除 ${toRemove.length} 条重复书签`);
+  await loadBookmarks();
+}
+
+/* ---- Bookmarks event wiring ---- */
+document.getElementById('bmRefresh')?.addEventListener('click', () => {
+  bmLoaded = false;
+  loadBookmarks();
+});
+
+document.getElementById('bmList')?.addEventListener('click', (e) => {
+  // Empty-folder card delete
+  const delFolderBtn = e.target.closest('[data-bm-action="delete-folder"]');
+  if (delFolderBtn) {
+    const card = delFolderBtn.closest('.bm-folder-card');
+    if (card) deleteEmptyFolder(card.dataset.folderId, card);
+    return;
+  }
+  // Per-row delete
+  const delBtn = e.target.closest('[data-bm-action="delete"]');
+  if (delBtn) {
+    const row = delBtn.closest('.bm-row');
+    if (row) deleteBookmark(row.dataset.bmId, row);
+    return;
+  }
+  // Group header click — toggle collapse (but not when clicking the checkbox)
+  const header = e.target.closest('.bm-group-header');
+  if (header && !e.target.closest('.bm-group-check')) {
+    const group = header.closest('.bm-group');
+    if (!group) return;
+    const key = group.dataset.groupKey;
+    if (bmCollapsedGroups.has(key)) bmCollapsedGroups.delete(key);
+    else bmCollapsedGroups.add(key);
+    group.classList.toggle('is-collapsed');
+  }
+});
+
+document.getElementById('bmList')?.addEventListener('change', (e) => {
+  // Per-row move
+  const moveSel = e.target.closest('[data-bm-action="move"]');
+  if (moveSel) {
+    const parentId = moveSel.value;
+    if (!parentId) return;
+    const row = moveSel.closest('.bm-row');
+    if (!row) return;
+    moveBookmark(row.dataset.bmId, parentId, row);
+    moveSel.value = '';
+    return;
+  }
+  // Per-row checkbox
+  const rowCheck = e.target.closest('[data-bm-action="select"]');
+  if (rowCheck) {
+    const row = rowCheck.closest('.bm-row');
+    if (!row) return;
+    const id = row.dataset.bmId;
+    if (rowCheck.checked) bmSelected.add(id); else bmSelected.delete(id);
+    // Sync the parent group header's checkbox state
+    const group = rowCheck.closest('.bm-group');
+    if (group) syncGroupCheckbox(group);
+    updateBmSelectionUI();
+    return;
+  }
+  // Group "select all" checkbox
+  const groupCheck = e.target.closest('[data-bm-action="select-group"]');
+  if (groupCheck) {
+    const group = groupCheck.closest('.bm-group');
+    if (!group) return;
+    const checks = group.querySelectorAll('.bm-row .bm-check');
+    checks.forEach(cb => {
+      cb.checked = groupCheck.checked;
+      const id = cb.closest('.bm-row')?.dataset.bmId;
+      if (!id) return;
+      if (groupCheck.checked) bmSelected.add(id); else bmSelected.delete(id);
+    });
+    groupCheck.indeterminate = false;
+    updateBmSelectionUI();
+  }
+});
+
+function syncGroupCheckbox(group) {
+  const check = group.querySelector('.bm-group-check');
+  if (!check) return;
+  const items = group.querySelectorAll('.bm-row .bm-check');
+  const total = items.length;
+  const checked = [...items].filter(c => c.checked).length;
+  check.checked = total > 0 && checked === total;
+  check.indeterminate = checked > 0 && checked < total;
+}
+
+document.getElementById('bmSelClear')?.addEventListener('click', () => {
+  bmSelected.clear();
+  document.querySelectorAll('.bm-check, .bm-group-check').forEach(cb => {
+    cb.checked = false;
+    cb.indeterminate = false;
+  });
+  updateBmSelectionUI();
+});
+
+document.getElementById('bmBulkDeleteBtn')?.addEventListener('click', bulkDeleteSelected);
+
+document.getElementById('bmBulkMoveSelect')?.addEventListener('change', (e) => {
+  const parentId = e.target.value;
+  if (!parentId) return;
+  bulkMoveSelected(parentId);
+  e.target.value = '';
+});
+
+document.querySelectorAll('.bm-filter').forEach(btn => {
+  btn.addEventListener('click', () => {
+    bmFilter = btn.dataset.filter;
+    document.querySelectorAll('.bm-filter').forEach(b => b.classList.toggle('is-active', b === btn));
+    renderBmList();
+  });
+});
+
+document.getElementById('bmSort')?.addEventListener('change', (e) => {
+  bmSort = e.target.value;
+  renderBmList();
+});
+
+document.getElementById('bmFolderFilter')?.addEventListener('change', (e) => {
+  bmFolderFilterId = e.target.value;
+  renderBmList();
+});
+
+document.getElementById('bmDedupeBtn')?.addEventListener('click', bulkDedupe);
+document.getElementById('bmClearEmptyBtn')?.addEventListener('click', bulkClearEmptyFolders);
+
+document.getElementById('bmFolderNav')?.addEventListener('click', (e) => {
+  const pill = e.target.closest('.bm-folder-pill');
+  if (!pill) return;
+  e.preventDefault();
+  const target = document.getElementById(pill.dataset.anchor);
+  if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+});
+
+
+/* ---- Drag-drop re-categorization ---- */
+function clearBmDropTargets() {
+  document.querySelectorAll('.is-drop-target').forEach(el => el.classList.remove('is-drop-target'));
+}
+
+document.getElementById('bmList')?.addEventListener('dragstart', (e) => {
+  const row = e.target.closest('.bm-row[draggable="true"]');
+  if (!row) return;
+  e.dataTransfer.effectAllowed = 'move';
+  // If the dragged item is selected and there are multiple in selection, drag all of them
+  const ids = bmSelected.has(row.dataset.bmId) && bmSelected.size > 1
+    ? [...bmSelected].join(',')
+    : row.dataset.bmId;
+  e.dataTransfer.setData('text/x-bm-ids', ids);
+  e.dataTransfer.setData('text/plain', ids);
+  row.classList.add('is-dragging');
+});
+
+document.getElementById('bmList')?.addEventListener('dragend', (e) => {
+  const row = e.target.closest('.bm-row');
+  if (row) row.classList.remove('is-dragging');
+  clearBmDropTargets();
+});
+
+// Drop on a folder lane (any .bm-group with a non-empty parentId)
+document.getElementById('bmList')?.addEventListener('dragover', (e) => {
+  const group = e.target.closest('.bm-group');
+  if (!group || !group.dataset.parentId) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+  if (!group.classList.contains('is-drop-target')) {
+    clearBmDropTargets();
+    group.classList.add('is-drop-target');
+  }
+});
+
+document.getElementById('bmList')?.addEventListener('dragleave', (e) => {
+  // Only clear when leaving the list entirely
+  if (e.target === e.currentTarget) clearBmDropTargets();
+});
+
+document.getElementById('bmList')?.addEventListener('drop', async (e) => {
+  const group = e.target.closest('.bm-group');
+  if (!group || !group.dataset.parentId) return;
+  e.preventDefault();
+  const idsRaw = e.dataTransfer.getData('text/x-bm-ids') || e.dataTransfer.getData('text/plain');
+  if (!idsRaw) return;
+  clearBmDropTargets();
+  await dropBookmarksToFolder(idsRaw.split(','), group.dataset.parentId);
+});
+
+// Drop on a folder TOC pill
+document.getElementById('bmFolderNav')?.addEventListener('dragover', (e) => {
+  const pill = e.target.closest('.bm-folder-pill');
+  if (!pill || !pill.dataset.parentId) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+  if (!pill.classList.contains('is-drop-target')) {
+    clearBmDropTargets();
+    pill.classList.add('is-drop-target');
+  }
+});
+
+document.getElementById('bmFolderNav')?.addEventListener('drop', async (e) => {
+  const pill = e.target.closest('.bm-folder-pill');
+  if (!pill || !pill.dataset.parentId) return;
+  e.preventDefault();
+  const idsRaw = e.dataTransfer.getData('text/x-bm-ids') || e.dataTransfer.getData('text/plain');
+  if (!idsRaw) return;
+  clearBmDropTargets();
+  await dropBookmarksToFolder(idsRaw.split(','), pill.dataset.parentId);
+});
+
+async function dropBookmarksToFolder(ids, parentId) {
+  if (!ids || !ids.length || !parentId) return;
+  // Filter out items already in target folder
+  const idsToMove = ids.filter(id => {
+    const b = bmFlat.find(x => x.id === id);
+    return b && b.parentId !== parentId;
+  });
+  if (!idsToMove.length) return;
+  let moved = 0;
+  for (const id of idsToMove) {
+    try { await chrome.bookmarks.move(id, { parentId }); moved++; }
+    catch (err) { console.warn('[tab-out] drop move failed for', id, err); }
+  }
+  // Clear selection if we moved selected items
+  if (idsToMove.some(id => bmSelected.has(id))) bmSelected.clear();
+  const folder = bmFolders.find(f => f.id === parentId);
+  showToast?.(`已移动 ${moved} 条到「${folder?.title || folder?.path || ''}」`);
+  await loadBookmarks();
+}
+
+
+/* ================================================================
+   时间洞察 — Timeline Insights
+
+   Buckets bmFlat by N-month windows aligned to the calendar (e.g.
+   2024 H1, 2024 H2, ...). Per bucket: top domains, top keywords
+   (mixed CJK + ASCII), monthly density sparkline.
+   ================================================================ */
+
+const INS_STOPWORDS = new Set([
+  // English glue
+  'the','a','an','is','are','of','to','and','or','in','on','for','with','by','from',
+  'how','what','why','when','where','this','that','these','those','it','its','as','at',
+  'be','been','was','were','do','does','did','can','could','should','would','will',
+  'i','you','he','she','we','they','my','your','his','her','our','their',
+  'about','into','out','up','down','over','under','more','most','less','vs',
+  'com','org','net','www','html','htm','www2','app',
+  // Chinese function/glue
+  '的','了','和','与','或','在','是','有','被','把','这','那','你','我','他','她','它',
+  '我们','你们','他们','一个','一些','怎么','什么','为什么','如何','如果','可以','应该',
+  '会','要','到','上','下','中','里','内','外','前','后','使用','介绍','以及','一种',
+  '关于','已经','还是','不是','还有','但是','所以','因为','虽然','只是','非常','通过',
+]);
+
+let insLoaded = false;
+let insWindowMonths = 6;
+
+function insBucketBookmarks(items, monthsPerBucket) {
+  const buckets = new Map();
+  for (const b of items) {
+    if (!b.dateAdded) continue;
+    const d = new Date(b.dateAdded);
+    if (isNaN(d.getTime())) continue;
+    const year = d.getFullYear();
+    const month = d.getMonth();
+    const startMonth = Math.floor(month / monthsPerBucket) * monthsPerBucket;
+    const key = `${year}-${String(startMonth + 1).padStart(2, '0')}`;
+    if (!buckets.has(key)) {
+      const start = new Date(year, startMonth, 1);
+      const end = new Date(year, startMonth + monthsPerBucket, 0);
+      buckets.set(key, { key, start, end, items: [] });
+    }
+    buckets.get(key).items.push(b);
+  }
+  return [...buckets.values()].sort((a, b) => b.start - a.start);
+}
+
+function insTopDomains(items, n = 6) {
+  const counts = new Map();
+  for (const b of items) {
+    const d = bmDomain(b.url);
+    if (!d) continue;
+    counts.set(d, (counts.get(d) || 0) + 1);
+  }
+  return [...counts].sort((a, b) => b[1] - a[1]).slice(0, n);
+}
+
+function insExtractKeywords(items, n = 18) {
+  const counts = new Map();
+  for (const b of items) {
+    const t = b.title || '';
+    if (!t) continue;
+    // ASCII tokens
+    const ascii = t.toLowerCase().match(/[a-z][a-z0-9+#.-]{1,}/g) || [];
+    for (const w of ascii) {
+      if (INS_STOPWORDS.has(w) || w.length < 2 || /^\d+$/.test(w)) continue;
+      counts.set(w, (counts.get(w) || 0) + 1);
+    }
+    // CJK runs of 2-6 chars (no segmentation, but natural punctuation breaks usually help)
+    const cjk = t.match(/[\u4e00-\u9fa5]{2,6}/g) || [];
+    for (const w of cjk) {
+      if (INS_STOPWORDS.has(w)) continue;
+      counts.set(w, (counts.get(w) || 0) + 1);
+    }
+  }
+  return [...counts].sort((a, b) => b[1] - a[1]).slice(0, n);
+}
+
+function insMonthlyDensity(bucket) {
+  const months = [];
+  const cur = new Date(bucket.start);
+  while (cur <= bucket.end) {
+    months.push({ year: cur.getFullYear(), month: cur.getMonth(), count: 0 });
+    cur.setMonth(cur.getMonth() + 1);
+  }
+  for (const b of bucket.items) {
+    const d = new Date(b.dateAdded);
+    for (const m of months) {
+      if (m.year === d.getFullYear() && m.month === d.getMonth()) { m.count++; break; }
+    }
+  }
+  return months;
+}
+
+function insFormatRange(bucket) {
+  const s = bucket.start, e = bucket.end;
+  const sStr = `${s.getFullYear()}年${s.getMonth() + 1}月`;
+  const eStr = `${e.getFullYear()}年${e.getMonth() + 1}月`;
+  return s.getFullYear() === e.getFullYear() && s.getMonth() === e.getMonth()
+    ? sStr
+    : `${sStr} – ${eStr}`;
+}
+
+function renderInsightCard(bucket) {
+  const domains = insTopDomains(bucket.items, 6);
+  const keywords = insExtractKeywords(bucket.items, 18);
+  const density = insMonthlyDensity(bucket);
+  const maxC = Math.max(...density.map(d => d.count), 1);
+
+  const sparkline = density.map(d => {
+    const h = d.count > 0 ? Math.max(4, Math.round((d.count / maxC) * 32)) : 2;
+    return `<span class="ins-bar" style="height:${h}px" title="${d.year}-${String(d.month + 1).padStart(2, '0')}: ${d.count} 条"></span>`;
+  }).join('');
+
+  const monthLabels = density.map(d => `<span class="ins-bar-label">${d.month + 1}</span>`).join('');
+
+  const domainsHtml = domains.map(([d, c]) =>
+    `<span class="ins-domain"><span class="ins-domain-name">${escapeHtml(d)}</span><span class="ins-domain-c">${c}</span></span>`
+  ).join('');
+
+  const minK = keywords.length ? keywords[keywords.length - 1][1] : 1;
+  const maxK = keywords.length ? keywords[0][1] : 1;
+  const keywordsHtml = keywords.map(([w, c]) => {
+    const ratio = maxK === minK ? 0.5 : (c - minK) / (maxK - minK);
+    const size = (14 + ratio * 10).toFixed(1);
+    const weight = ratio > 0.6 ? 700 : ratio > 0.3 ? 600 : 500;
+    return `<span class="ins-kw" style="font-size:${size}px;font-weight:${weight}" title="${c} 次">${escapeHtml(w)}</span>`;
+  }).join('');
+
+  return `
+    <div class="ins-card">
+      <div class="ins-card-head">
+        <div class="ins-period">${escapeHtml(insFormatRange(bucket))}</div>
+        <div class="ins-count">${bucket.items.length} 条</div>
+      </div>
+      <div class="ins-spark-wrap">
+        <div class="ins-spark">${sparkline}</div>
+        <div class="ins-spark-labels">${monthLabels}</div>
+      </div>
+      <div class="ins-block">
+        <div class="ins-label">主要域名</div>
+        <div class="ins-domains">${domainsHtml || '<span class="ins-empty-text">无</span>'}</div>
+      </div>
+      <div class="ins-block">
+        <div class="ins-label">关键词</div>
+        <div class="ins-keywords">${keywordsHtml || '<span class="ins-empty-text">标题里没找到关键词</span>'}</div>
+      </div>
+    </div>
+  `;
+}
+
+function renderInsights() {
+  const list   = document.getElementById('insList');
+  const count  = document.getElementById('insCount');
+  const status = document.getElementById('insStatus');
+  if (!list) return;
+  const buckets = insBucketBookmarks(bmFlat, insWindowMonths);
+  if (count) count.textContent = `${bmFlat.length} 条 · ${buckets.length} 个时段`;
+  if (!buckets.length) {
+    list.innerHTML = '<div class="ins-empty">没有可分析的书签（书签需要带时间戳）。</div>';
+  } else {
+    list.innerHTML = buckets.map(renderInsightCard).join('');
+  }
+  if (status) status.textContent = '';
+}
+
+async function loadInsights() {
+  const status = document.getElementById('insStatus');
+  if (!bmLoaded) {
+    if (status) status.textContent = '正在读取书签…';
+    await loadBookmarks();
+  }
+  insLoaded = true;
+  renderInsights();
+}
+
+document.getElementById('insRefresh')?.addEventListener('click', async () => {
+  bmLoaded = false; insLoaded = false;
+  await loadInsights();
+});
+
+document.getElementById('insWindow')?.addEventListener('change', (e) => {
+  insWindowMonths = parseInt(e.target.value, 10) || 6;
+  if (insLoaded) renderInsights();
+});
+
+
+/* ================================================================
+   近期足迹 — Browser History insights
+
+   Pulls from chrome.history.search() over a configurable window
+   (7/30/90 days). Renders: stat strip, category breakdown,
+   top domains, top pages.
+   ================================================================ */
+
+let histLoaded = false;
+let histWindowDays = 30;
+let histItems = [];
+
+async function loadHistoryInsights() {
+  const status = document.getElementById('histStatus');
+  if (!chrome.history) {
+    if (status) status.innerHTML = '<div class="bm-error">chrome.history API 不可用，请确认扩展已加 history 权限并重新加载。</div>';
+    return;
+  }
+  if (status) status.textContent = '正在读取浏览历史…';
+  try {
+    const startTime = Date.now() - histWindowDays * 86400000;
+    histItems = await chrome.history.search({ text: '', startTime, maxResults: 50000 });
+    histLoaded = true;
+    renderHistoryInsights();
+    if (status) status.textContent = '';
+  } catch (err) {
+    if (status) status.innerHTML = `<div class="bm-error">读取失败: ${escapeHtml(err.message || String(err))}</div>`;
+    console.warn('[tab-out] history load failed', err);
+  }
+}
+
+function histDomainOf(url) {
+  try { return new URL(url).hostname.toLowerCase().replace(/^www\./, ''); } catch { return ''; }
+}
+
+function renderHistStats() {
+  const wrap = document.getElementById('histStats');
+  const count = document.getElementById('histCount');
+  if (!wrap) return;
+  const totalItems = histItems.length;
+  const totalVisits = histItems.reduce((s, it) => s + (it.visitCount || 0), 0);
+  const uniqueDomains = new Set();
+  for (const it of histItems) { const d = histDomainOf(it.url); if (d) uniqueDomains.add(d); }
+  if (count) count.textContent = totalItems ? `${totalItems} 个页面 · ${histWindowDays} 天` : '';
+  wrap.innerHTML = `
+    <div class="hist-stat"><div class="hist-stat-num">${totalItems.toLocaleString()}</div><div class="hist-stat-label">不同页面</div></div>
+    <div class="hist-stat"><div class="hist-stat-num">${uniqueDomains.size.toLocaleString()}</div><div class="hist-stat-label">不同域名</div></div>
+    <div class="hist-stat"><div class="hist-stat-num">${totalVisits.toLocaleString()}</div><div class="hist-stat-label">总访问次数 (历史累计)</div></div>
+  `;
+}
+
+function renderHistCategories() {
+  const wrap = document.getElementById('histCategories');
+  if (!wrap) return;
+  // Aggregate visit counts by category
+  const cats = new Map(); // label -> { label, cls, visits, domains: Set }
+  let other = { label: '其他', cls: 'cat-other', visits: 0, domains: new Set() };
+  for (const it of histItems) {
+    const cat = bmCategoryFor(it.url);
+    const d = histDomainOf(it.url);
+    if (cat) {
+      const e = cats.get(cat.label) || { label: cat.label, cls: cat.cls, visits: 0, domains: new Set() };
+      e.visits += it.visitCount || 0;
+      if (d) e.domains.add(d);
+      cats.set(cat.label, e);
+    } else {
+      other.visits += it.visitCount || 0;
+      if (d) other.domains.add(d);
+    }
+  }
+  const all = [...cats.values()];
+  if (other.visits > 0) all.push(other);
+  const totalVisits = all.reduce((s, e) => s + e.visits, 0);
+  if (!totalVisits) {
+    wrap.innerHTML = '<div class="hist-empty">暂无数据</div>';
+    return;
+  }
+  all.sort((a, b) => b.visits - a.visits);
+  wrap.innerHTML = all.map(e => {
+    const pct = (e.visits / totalVisits * 100).toFixed(1);
+    return `
+      <div class="hist-cat-row">
+        <div class="hist-cat-label">
+          <span class="bm-tag bm-cat ${e.cls}">${escapeHtml(e.label)}</span>
+        </div>
+        <div class="hist-cat-bar-wrap">
+          <div class="hist-cat-bar ${e.cls}" style="width:${pct}%"></div>
+        </div>
+        <div class="hist-cat-stats">
+          <span class="hist-cat-pct">${pct}%</span>
+          <span class="hist-cat-count">${e.visits.toLocaleString()} 次 · ${e.domains.size} 域名</span>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function renderHistTopDomains() {
+  const wrap = document.getElementById('histDomains');
+  if (!wrap) return;
+  const counts = new Map();
+  for (const it of histItems) {
+    const d = histDomainOf(it.url);
+    if (!d) continue;
+    const e = counts.get(d) || { domain: d, visits: 0, pages: 0, lastVisit: 0 };
+    e.visits += it.visitCount || 0;
+    e.pages += 1;
+    if ((it.lastVisitTime || 0) > e.lastVisit) e.lastVisit = it.lastVisitTime || 0;
+    counts.set(d, e);
+  }
+  const top = [...counts.values()].sort((a, b) => b.visits - a.visits).slice(0, 15);
+  if (!top.length) {
+    wrap.innerHTML = '<div class="hist-empty">暂无数据</div>';
+    return;
+  }
+  const max = top[0].visits;
+  wrap.innerHTML = top.map(e => {
+    const pct = (e.visits / max * 100).toFixed(0);
+    const cat = bmCategoryFor('https://' + e.domain);
+    const catTag = cat ? `<span class="bm-tag bm-cat ${cat.cls}">${escapeHtml(cat.label)}</span>` : '';
+    return `
+      <div class="hist-domain-row">
+        <img class="bm-favicon" src="${escapeHtml(`https://www.google.com/s2/favicons?domain=${e.domain}&sz=32`)}" alt="" loading="lazy">
+        <div class="hist-domain-name">${escapeHtml(e.domain)}</div>
+        ${catTag}
+        <div class="hist-domain-bar-wrap"><div class="hist-domain-bar" style="width:${pct}%"></div></div>
+        <div class="hist-domain-stats">
+          <strong>${e.visits.toLocaleString()}</strong> 次 · ${e.pages} 页
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function renderHistTopPages() {
+  const wrap = document.getElementById('histPages');
+  if (!wrap) return;
+  const sorted = histItems
+    .slice()
+    .sort((a, b) => (b.visitCount || 0) - (a.visitCount || 0))
+    .slice(0, 30);
+  if (!sorted.length) {
+    wrap.innerHTML = '<div class="hist-empty">暂无数据</div>';
+    return;
+  }
+  const max = sorted[0].visitCount || 1;
+  wrap.innerHTML = sorted.map(it => {
+    const d = histDomainOf(it.url);
+    const cat = bmCategoryFor(it.url);
+    const catTag = cat ? `<span class="bm-tag bm-cat ${cat.cls}">${escapeHtml(cat.label)}</span>` : '';
+    const visits = it.visitCount || 0;
+    const pct = (visits / max * 100).toFixed(0);
+    return `
+      <div class="hist-page-row">
+        <img class="bm-favicon" src="${escapeHtml(`https://www.google.com/s2/favicons?domain=${d}&sz=32`)}" alt="" loading="lazy">
+        <div class="hist-page-main">
+          <a class="hist-page-title" href="${escapeHtml(it.url)}" target="_blank" rel="noopener" title="${escapeHtml(it.title || it.url)}">${escapeHtml(it.title || it.url)}</a>
+          <div class="hist-page-meta">
+            <span class="hist-page-domain">${escapeHtml(d)}</span>
+            ${catTag}
+          </div>
+        </div>
+        <div class="hist-page-bar-wrap"><div class="hist-page-bar" style="width:${pct}%"></div></div>
+        <div class="hist-page-count">
+          <strong>${visits.toLocaleString()}</strong>
+          <span>次</span>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+// Hex colors keyed by bm category class — used for SVG fill/stroke
+const HIST_CAT_COLOR = {
+  'cat-video':  '#C75B3F',
+  'cat-code':   '#6B5544',
+  'cat-ai':     '#3A2A1F',
+  'cat-news':   '#6E9F6E',
+  'cat-design': '#E89378',
+  'cat-learn':  '#D6A04D',
+  'cat-shop':   '#D6684D',
+  'cat-tool':   '#9C8169',
+  'cat-other':  '#C5B7A8',
+};
+
+async function loadHistClockData() {
+  const status = document.getElementById('histClockStatus');
+  if (status) status.textContent = '正在统计每次访问的时间…';
+  const startTime = Date.now() - histWindowDays * 86400000;
+  const items = histItems;
+  const concurrency = 16;
+  let cursor = 0;
+  // hour -> Map<categoryLabel, {label, cls, count}>
+  const grid = Array.from({ length: 24 }, () => new Map());
+  await Promise.all(Array.from({ length: concurrency }, async () => {
+    while (cursor < items.length) {
+      const it = items[cursor++];
+      try {
+        const list = await chrome.history.getVisits({ url: it.url });
+        const cat = bmCategoryFor(it.url);
+        const label = cat ? cat.label : '其他';
+        const cls   = cat ? cat.cls   : 'cat-other';
+        for (const v of list) {
+          if (!v.visitTime || v.visitTime < startTime) continue;
+          const hr = new Date(v.visitTime).getHours();
+          const m = grid[hr];
+          const e = m.get(label) || { label, cls, count: 0 };
+          e.count++;
+          m.set(label, e);
+        }
+      } catch { /* ignore unreadable URLs */ }
+    }
+  }));
+  if (status) status.textContent = '';
+  return grid;
+}
+
+function renderHistClock(grid) {
+  const wrap = document.getElementById('histClock');
+  const peakWrap = document.getElementById('histPeakList');
+  const legendWrap = document.getElementById('histClockLegend');
+  if (!wrap) return;
+
+  const totalsByHour = grid.map(m => [...m.values()].reduce((s, e) => s + e.count, 0));
+  const maxCount = Math.max(...totalsByHour, 1);
+  const totalAll = totalsByHour.reduce((s, n) => s + n, 0);
+
+  if (!totalAll) {
+    wrap.innerHTML = '<div class="hist-empty">暂无访问数据</div>';
+    if (peakWrap) peakWrap.innerHTML = '';
+    if (legendWrap) legendWrap.innerHTML = '';
+    return;
+  }
+
+  // Consistent stacking order: most-visited categories at the bottom
+  const seenCats = new Map();
+  for (const m of grid) for (const e of m.values()) {
+    if (!seenCats.has(e.label)) seenCats.set(e.label, { label: e.label, cls: e.cls, count: 0 });
+    seenCats.get(e.label).count += e.count;
+  }
+  const orderedCats = [...seenCats.values()].sort((a, b) => b.count - a.count);
+  const peakHour = totalsByHour.indexOf(maxCount);
+
+  // Build 24 stacked columns
+  const cols = [];
+  for (let h = 0; h < 24; h++) {
+    const total = totalsByHour[h];
+    const heightPct = (total / maxCount) * 100;
+    let segments = '';
+    if (total > 0) {
+      segments = orderedCats.map(cat => {
+        const e = grid[h].get(cat.label);
+        if (!e || !e.count) return '';
+        const segPct = (e.count / total) * 100;
+        const color = HIST_CAT_COLOR[cat.cls] || HIST_CAT_COLOR['cat-other'];
+        return `<div class="hist-hour-seg" style="height:${segPct.toFixed(2)}%;background:${color}" title="${h}:00 ${escapeHtml(cat.label)}: ${e.count}"></div>`;
+      }).join('');
+    }
+    const isPeak = h === peakHour && total > 0;
+    cols.push(`
+      <div class="hist-hour-col${isPeak ? ' is-peak' : ''}" title="${String(h).padStart(2,'0')}:00 — ${total} 次">
+        <div class="hist-hour-count">${total > 0 ? total : ''}</div>
+        <div class="hist-hour-stack" style="height:${heightPct.toFixed(2)}%">${segments}</div>
+        <div class="hist-hour-label">${String(h).padStart(2,'0')}</div>
+      </div>
+    `);
+  }
+  wrap.innerHTML = `<div class="hist-hourly-chart">${cols.join('')}</div>`;
+
+  // Peak list — top 3 hours
+  if (peakWrap) {
+    const ranked = totalsByHour
+      .map((c, h) => ({ h, c }))
+      .filter(x => x.c > 0)
+      .sort((a, b) => b.c - a.c)
+      .slice(0, 3);
+    peakWrap.innerHTML = `
+      <div class="hist-peak-title">活跃时段 TOP 3</div>
+      <ol class="hist-peak-ol">
+        ${ranked.map(({ h, c }) => {
+          const dom = [...grid[h].values()].sort((a, b) => b.count - a.count)[0];
+          const color = HIST_CAT_COLOR[dom.cls];
+          const pct = ((c / totalAll) * 100).toFixed(0);
+          return `<li>
+            <span class="hist-peak-hour">${String(h).padStart(2,'0')}:00</span>
+            <span class="hist-peak-bar" style="background:${color}; width:${(c/maxCount*100).toFixed(0)}%"></span>
+            <span class="hist-peak-meta"><strong>${dom.label}</strong> · ${c} 次 · ${pct}%</span>
+          </li>`;
+        }).join('')}
+      </ol>
+    `;
+  }
+
+  // Legend — only categories that appear
+  if (legendWrap) {
+    const seen = new Map();
+    for (const m of grid) for (const e of m.values()) {
+      if (!seen.has(e.label)) seen.set(e.label, { label: e.label, cls: e.cls, count: 0 });
+      seen.get(e.label).count += e.count;
+    }
+    const items = [...seen.values()].sort((a, b) => b.count - a.count);
+    legendWrap.innerHTML = `
+      <div class="hist-legend-title">类别图例</div>
+      <div class="hist-legend-grid">
+        ${items.map(it => `
+          <div class="hist-legend-item">
+            <span class="hist-legend-swatch" style="background:${HIST_CAT_COLOR[it.cls]}"></span>
+            <span class="hist-legend-label">${escapeHtml(it.label)}</span>
+            <span class="hist-legend-count">${it.count.toLocaleString()}</span>
+          </div>
+        `).join('')}
+      </div>
+    `;
+  }
+}
+
+async function renderHistoryInsights() {
+  if (!histItems.length) {
+    const status = document.getElementById('histStatus');
+    if (status) status.textContent = '这个时段没有浏览记录。';
+    ['histStats', 'histClock', 'histPeakList', 'histClockLegend', 'histCategories', 'histDomains', 'histPages']
+      .forEach(id => { const el = document.getElementById(id); if (el) el.innerHTML = ''; });
+    return;
+  }
+  renderHistStats();
+  renderHistCategories();
+  renderHistTopDomains();
+  renderHistTopPages();
+  // Clock requires async getVisits — kicks off, renders when done
+  const grid = await loadHistClockData();
+  renderHistClock(grid);
+}
+
+document.getElementById('histRefresh')?.addEventListener('click', () => {
+  histLoaded = false;
+  loadHistoryInsights();
+});
+
+document.getElementById('histWindow')?.addEventListener('change', (e) => {
+  histWindowDays = parseInt(e.target.value, 10) || 30;
+  histLoaded = false;
+  loadHistoryInsights();
+});
+
+
+/* ----------------------------------------------------------------
+   VIEW TABS — switch between Open Tabs / 整理收藏夹 / 时间洞察 / 近期足迹
+   ---------------------------------------------------------------- */
+function setActiveView(view) {
+  document.body.dataset.view = view;
+  document.querySelectorAll('.view-tab').forEach(t => {
+    t.classList.toggle('is-active', t.dataset.view === view);
+  });
+  document.querySelectorAll('.view-pane').forEach(p => {
+    p.classList.toggle('is-active', p.dataset.view === view);
+  });
+  if (view === 'bookmarks' && !bmLoaded) loadBookmarks();
+  if (view === 'insights' && !insLoaded) loadInsights();
+  if (view === 'history' && !histLoaded) loadHistoryInsights();
+}
+
+document.getElementById('viewTabs')?.addEventListener('click', (e) => {
+  const tab = e.target.closest('.view-tab');
+  if (!tab) return;
+  setActiveView(tab.dataset.view);
+});
+
+
+/* ----------------------------------------------------------------
    INITIALIZE
    ---------------------------------------------------------------- */
 renderDashboard();
