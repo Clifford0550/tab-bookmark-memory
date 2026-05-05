@@ -5,9 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Tab Out</title>
 
-  <!-- Google Fonts: Newsreader (for headings/numbers) + DM Sans (for body text) -->
+  <!-- Google Fonts: Plus Jakarta Sans -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,300;0,6..72,400;0,6..72,500;1,6..72,300;1,6..72,400&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 
   <link rel="stylesheet" href="style.css">
 </head>
@@ -26,6 +27,11 @@
       <!-- "Friday, April 4, 2026" — written by getDateDisplay() in app.js -->
       <div class="date" id="dateDisplay"></div>
     </div>
+    <div class="theme-switcher" id="themeSwitcher" role="radiogroup" aria-label="主题">
+      <button class="theme-swatch theme-typesys is-active" data-theme="typesys" title="TypeSys 默认 — 沙绿森林" aria-label="TypeSys"></button>
+      <button class="theme-swatch theme-warm"               data-theme="warm"    title="Roughcut 暖橙 — 奶油 + 砖红"    aria-label="Roughcut Warm"></button>
+      <button class="theme-swatch theme-dark"               data-theme="dark"    title="深色模式"                       aria-label="Dark"></button>
+    </div>
   </header>
 
   <!-- ================================================================
@@ -40,10 +46,10 @@
         </svg>
       </div>
       <div class="tab-cleanup-text">
-        You have <strong id="tabOutDupeCount"></strong> Tab Out tabs open. Keep just this one?
+        你开了 <strong id="tabOutDupeCount"></strong> 个 Tab Bookmark 标签页，只留这一个吧？
       </div>
     </div>
-    <button class="tab-cleanup-btn" data-action="close-tabout-dupes">Close extras</button>
+    <button class="tab-cleanup-btn" data-action="close-tabout-dupes">关掉多余的</button>
   </div>
 
   <!-- ================================================================
@@ -239,7 +245,7 @@
     <section class="hist-block">
       <div class="hist-block-head">
         <h3>高频域名</h3>
-        <span class="hist-block-hint">点行过滤页面到该域名</span>
+        <span class="hist-block-hint">点击域名查看它下面的页面</span>
       </div>
       <div class="hist-domains" id="histDomains"></div>
     </section>

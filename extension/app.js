@@ -346,14 +346,14 @@ function playCloseSound() {
  */
 function shootConfetti(x, y) {
   const colors = [
-    '#c8713a', // amber
-    '#e8a070', // amber light
-    '#5a7a62', // sage
-    '#8aaa92', // sage light
-    '#5a6b7a', // slate
-    '#8a9baa', // slate light
-    '#d4b896', // warm paper
-    '#b35a5a', // rose
+    '#2C4332', // forest green (primary)
+    '#4A6552', // forest light
+    '#6E7E66', // sage
+    '#B8C0AE', // sage soft
+    '#DCD3C3', // beige (card)
+    '#CABFA9', // beige deep
+    '#1B1F1B', // ink
+    '#5A5A56', // ink soft
   ];
 
   const particleCount = 17;
@@ -1757,14 +1757,12 @@ function renderBmRow(b) {
   if (dup) cls.push('is-dup');
   if (dead) cls.push('is-dead');
   if (tier !== 'fresh') cls.push(tier);
-  // Cards are draggable only when grouped by folder (drop target = a folder)
-  const draggable = bmSort === 'folder' ? 'draggable="true"' : '';
   return `
-    <div class="${cls.join(' ')}" data-bm-id="${escapeHtml(b.id)}" ${draggable}>
+    <div class="${cls.join(' ')}" data-bm-id="${escapeHtml(b.id)}">
       <input type="checkbox" class="bm-check" data-bm-action="select" ${checked}>
       <button class="bm-delete" data-bm-action="delete" title="删除">×</button>
-      <a class="bm-title-link" href="${escapeHtml(b.url)}" target="_blank" rel="noopener" draggable="false" title="${escapeHtml(b.title || b.url)}">
-        <img class="bm-favicon" src="${escapeHtml(bmFaviconUrl(b.url))}" alt="" loading="lazy" draggable="false">
+      <a class="bm-title-link" href="${escapeHtml(b.url)}" target="_blank" rel="noopener" title="${escapeHtml(b.title || b.url)}">
+        <img class="bm-favicon" src="${escapeHtml(bmFaviconUrl(b.url))}" alt="" loading="lazy">
         <span class="bm-title">${escapeHtml(b.title || b.url)}</span>
       </a>
       <div class="bm-meta">
@@ -1845,9 +1843,7 @@ function renderBmFolderNav(groupOrder) {
   nav.style.display = 'flex';
   nav.innerHTML = groupOrder.map(([path, items]) => {
     const id = bmAnchorIdFor(path);
-    // Pills are drop targets only when grouped by folder
-    const parentId = bmSort === 'folder' ? (items[0]?.parentId || '') : '';
-    return `<a class="bm-folder-pill" href="#${id}" data-anchor="${id}" data-parent-id="${escapeHtml(parentId)}" title="${escapeHtml(path)}">
+    return `<a class="bm-folder-pill" href="#${id}" data-anchor="${id}" title="${escapeHtml(path)}">
       <span class="bm-folder-pill-name">${escapeHtml(path.split(' / ').pop())}</span>
       <span class="bm-folder-pill-count">${items.length}</span>
     </a>`;
@@ -1926,11 +1922,8 @@ function renderBmList() {
       const allChecked = items.every(b => bmSelected.has(b.id));
       const someChecked = !allChecked && items.some(b => bmSelected.has(b.id));
       const id = bmAnchorIdFor(key);
-      // For folder-grouping, parentId comes from any item (they all share it).
-      // For domain-grouping, no parent (drop disabled — different folders may share a domain).
-      const parentId = bmSort === 'folder' ? (items[0]?.parentId || '') : '';
       return `
-        <div class="bm-group${collapsed}" data-group-key="${escapeHtml(key)}" data-parent-id="${escapeHtml(parentId)}" id="${id}">
+        <div class="bm-group${collapsed}" data-group-key="${escapeHtml(key)}" id="${id}">
           <div class="bm-group-header">
             <input type="checkbox" class="bm-group-check" data-bm-action="select-group"
                    ${allChecked ? 'checked' : ''}
@@ -2534,100 +2527,6 @@ document.getElementById('bmFolderNav')?.addEventListener('click', (e) => {
 });
 
 
-/* ---- Drag-drop re-categorization ---- */
-function clearBmDropTargets() {
-  document.querySelectorAll('.is-drop-target').forEach(el => el.classList.remove('is-drop-target'));
-}
-
-document.getElementById('bmList')?.addEventListener('dragstart', (e) => {
-  const row = e.target.closest('.bm-row[draggable="true"]');
-  if (!row) return;
-  e.dataTransfer.effectAllowed = 'move';
-  // If the dragged item is selected and there are multiple in selection, drag all of them
-  const ids = bmSelected.has(row.dataset.bmId) && bmSelected.size > 1
-    ? [...bmSelected].join(',')
-    : row.dataset.bmId;
-  e.dataTransfer.setData('text/x-bm-ids', ids);
-  e.dataTransfer.setData('text/plain', ids);
-  row.classList.add('is-dragging');
-});
-
-document.getElementById('bmList')?.addEventListener('dragend', (e) => {
-  const row = e.target.closest('.bm-row');
-  if (row) row.classList.remove('is-dragging');
-  clearBmDropTargets();
-});
-
-// Drop on a folder lane (any .bm-group with a non-empty parentId)
-document.getElementById('bmList')?.addEventListener('dragover', (e) => {
-  const group = e.target.closest('.bm-group');
-  if (!group || !group.dataset.parentId) return;
-  e.preventDefault();
-  e.dataTransfer.dropEffect = 'move';
-  if (!group.classList.contains('is-drop-target')) {
-    clearBmDropTargets();
-    group.classList.add('is-drop-target');
-  }
-});
-
-document.getElementById('bmList')?.addEventListener('dragleave', (e) => {
-  // Only clear when leaving the list entirely
-  if (e.target === e.currentTarget) clearBmDropTargets();
-});
-
-document.getElementById('bmList')?.addEventListener('drop', async (e) => {
-  const group = e.target.closest('.bm-group');
-  if (!group || !group.dataset.parentId) return;
-  e.preventDefault();
-  const idsRaw = e.dataTransfer.getData('text/x-bm-ids') || e.dataTransfer.getData('text/plain');
-  if (!idsRaw) return;
-  clearBmDropTargets();
-  await dropBookmarksToFolder(idsRaw.split(','), group.dataset.parentId);
-});
-
-// Drop on a folder TOC pill
-document.getElementById('bmFolderNav')?.addEventListener('dragover', (e) => {
-  const pill = e.target.closest('.bm-folder-pill');
-  if (!pill || !pill.dataset.parentId) return;
-  e.preventDefault();
-  e.dataTransfer.dropEffect = 'move';
-  if (!pill.classList.contains('is-drop-target')) {
-    clearBmDropTargets();
-    pill.classList.add('is-drop-target');
-  }
-});
-
-document.getElementById('bmFolderNav')?.addEventListener('drop', async (e) => {
-  const pill = e.target.closest('.bm-folder-pill');
-  if (!pill || !pill.dataset.parentId) return;
-  e.preventDefault();
-  const idsRaw = e.dataTransfer.getData('text/x-bm-ids') || e.dataTransfer.getData('text/plain');
-  if (!idsRaw) return;
-  clearBmDropTargets();
-  await dropBookmarksToFolder(idsRaw.split(','), pill.dataset.parentId);
-});
-
-async function dropBookmarksToFolder(ids, parentId) {
-  if (!ids || !ids.length || !parentId) return;
-  // Filter out items already in target folder
-  const idsToMove = ids.filter(id => {
-    const b = bmFlat.find(x => x.id === id);
-    return b && b.parentId !== parentId;
-  });
-  if (!idsToMove.length) return;
-  let moved = 0;
-  for (const id of idsToMove) {
-    try { await chrome.bookmarks.move(id, { parentId }); moved++; }
-    catch (err) { console.warn('[tab-out] drop move failed for', id, err); }
-  }
-  // Clear selection if we moved selected items
-  if (idsToMove.some(id => bmSelected.has(id))) bmSelected.clear();
-  const folder = bmFolders.find(f => f.id === parentId);
-  showToast?.(`已移动 ${moved} 条到「${folder?.title || folder?.path || ''}」`);
-  await loadBookmarks();
-}
-
-
 /* ================================================================
    时间洞察 — Timeline Insights
 
@@ -3120,6 +3019,39 @@ document.getElementById('viewTabs')?.addEventListener('click', (e) => {
   const tab = e.target.closest('.view-tab');
   if (!tab) return;
   setActiveView(tab.dataset.view);
+});
+
+
+/* ----------------------------------------------------------------
+   THEME SWITCHER — typesys (default) / warm / dark
+   Choice persists in chrome.storage.local under key "theme"
+   ---------------------------------------------------------------- */
+const THEME_KEY = 'theme';
+const VALID_THEMES = new Set(['typesys', 'warm', 'dark']);
+
+function applyTheme(theme) {
+  if (!VALID_THEMES.has(theme)) theme = 'typesys';
+  document.documentElement.dataset.theme = theme;
+  document.querySelectorAll('.theme-swatch').forEach(btn => {
+    btn.classList.toggle('is-active', btn.dataset.theme === theme);
+  });
+}
+
+(async function loadInitialTheme() {
+  try {
+    const obj = await chrome.storage.local.get(THEME_KEY);
+    applyTheme(obj?.[THEME_KEY] || 'typesys');
+  } catch {
+    applyTheme('typesys');
+  }
+})();
+
+document.getElementById('themeSwitcher')?.addEventListener('click', async (e) => {
+  const btn = e.target.closest('.theme-swatch');
+  if (!btn) return;
+  const theme = btn.dataset.theme;
+  applyTheme(theme);
+  try { await chrome.storage.local.set({ [THEME_KEY]: theme }); } catch {}
 });
 
 
