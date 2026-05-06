@@ -111,7 +111,7 @@ Then go to `chrome://extensions` and click the ↻ icon on the extension card.
 MIT — see [LICENSE](./LICENSE)
 
 - Original project: MIT © 2026 Zara Zhang
-- Fork additions: MIT © 2026 饼饼几 / Karen Chuang
+- Fork additions: MIT © 2026 饼饼几
 
 You're free to use, modify, and redistribute under MIT. Please retain the original copyright notice.
 

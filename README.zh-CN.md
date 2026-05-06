@@ -111,7 +111,7 @@ cd tab-bookmark && git pull
 MIT — 见 [LICENSE](./LICENSE)
 
 - 原项目版权：MIT © 2026 Zara Zhang
-- 本 fork 新增功能版权：MIT © 2026 饼饼几 / Karen Chuang
+- 本 fork 新增功能版权：MIT © 2026 饼饼几
 
 按 MIT 你可以自由使用、修改、再分发，请保留原作者的版权声明。
 
