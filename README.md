@@ -51,7 +51,7 @@ Choice persists across sessions.
 Send this repo URL to Claude Code / Codex / similar:
 
 ```
-https://github.com/KarenChuang/tab-bookmark
+https://github.com/kellycatz/tab-bookmark
 ```
 
 Tell it "install this". Takes about a minute.
@@ -59,7 +59,7 @@ Tell it "install this". Takes about a minute.
 ### Option 2: manual
 
 ```bash
-git clone https://github.com/KarenChuang/tab-bookmark.git
+git clone https://github.com/kellycatz/tab-bookmark.git
 ```
 
 1. Open `chrome://extensions`
