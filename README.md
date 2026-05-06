@@ -46,7 +46,18 @@ Choice persists across sessions.
 
 ## Install
 
-### Option 1: hand it to a coding agent
+### Option 1: Download ZIP (easiest, no git required)
+
+1. Click the green **Code** button at the top-right of this repo's home page → **Download ZIP**
+2. **Unzip** the file anywhere (e.g. Desktop)
+3. Open Chrome and go to `chrome://extensions/`
+4. Toggle **Developer mode** (top-right)
+5. Click **Load unpacked** (top-left) and pick the `extension/` folder inside the unzipped directory
+6. Open a new tab — Chrome will prompt **"This page was changed by extension 'Tab Out'"** the first time → click **Keep changes**
+
+Done.
+
+### Option 2: hand it to a coding agent
 
 Send this repo URL to Claude Code / Codex / similar:
 
@@ -56,18 +67,13 @@ https://github.com/kellycatz/tab-bookmark
 
 Tell it "install this". Takes about a minute.
 
-### Option 2: manual
+### Option 3: clone with git
 
 ```bash
 git clone https://github.com/kellycatz/tab-bookmark.git
 ```
 
-1. Open `chrome://extensions`
-2. Toggle **Developer mode** (top-right)
-3. Click **Load unpacked** and pick the `extension/` folder
-4. On first load Chrome will prompt for **"Read and change your bookmarks / browsing history"** — click **Enable**
-
-Open a new tab — that's it.
+Then follow steps 3–6 of Option 1.
 
 ### Updating
 
