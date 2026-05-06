@@ -1,116 +1,125 @@
 # 📚 Tab Bookmark
 
-> 把浏览器收藏夹和历史记录变成一台时光机。
+**English** · [中文](./README.zh-CN.md)
 
-🍴 Forked from [zarazhangrui/tab-out](https://github.com/zarazhangrui/tab-out) — 在原 Tab Out 基础上加入了完整的「整理收藏夹」+「近期足迹」工作流。
+> Turn your browser bookmarks and history into a time machine.
+
+🍴 Forked from [zarazhangrui/tab-out](https://github.com/zarazhangrui/tab-out) — adds a full **bookmarks organizer** + **recent history footprint** workflow on top of the original Tab Out.
 
 ---
 
-## 这是什么
+## What is this
 
-Tab Bookmark 是一个 Chrome 扩展，把你的新标签页变成三件事的入口：
+Tab Bookmark is a Chrome extension that turns your new-tab page into three entry points:
 
-1. **🗂 浏览器标签** — 实时把所有打开的 tab 按域名分组
-2. **📚 整理收藏夹** — 重新认识 + 整理你那几百条祖传收藏
-3. **👣 近期足迹** — 用 7×24 热力图看你最近真正在花时间的地方
+1. **🗂 Open Tabs** — All open tabs grouped by domain in real time
+2. **📚 Organize Bookmarks** — Rediscover and clean up the hundreds of legacy bookmarks
+3. **👣 Recent Footprint** — A 7×24 weekly heatmap of where you actually spent your time
 
-完全本地。无服务器，无外部 API 调用，无账号。
+100% local. No server, no external API calls, no account.
 
 ---
 
 ## ✨ Features
 
-### 🗂 浏览器标签
+### 🗂 Open Tabs
 
-打开的 tab 按域名实时分组成卡片，Homepages 单独抽出（Gmail / X / LinkedIn / YouTube / GitHub）。关闭带 swoosh 音效 + 撒花动画。重复 tab 检测、稍后看清单、localhost 端口区分。
+All open tabs grouped by domain into cards in real time. Homepages (Gmail / X / LinkedIn / YouTube / GitHub) get pulled into their own group. Closing tabs comes with a swoosh sound + confetti. Duplicate-tab detection, save-for-later checklist, localhost port labels for vibe-coding projects.
 
-### 📚 整理收藏夹
+### 📚 Organize Bookmarks
 
-两种模式：**时光机** 把书签按 3 / 6 / 12 个月切成时段卡片，看完点 CTA 就能进入对应时段的整理；**浏览整理** 是横向 lane 视图，支持拖拽分类、多选批量删除/移动、sticky 文件夹导航。自带重复检测、失效检测、空文件夹清理、三档年龄分层（1 / 2 / 3 年+不同视觉强度）。
+Two modes: **Time Machine** buckets your bookmarks into 3 / 6 / 12 month period cards — click the CTA on any card to drop into cleanup scoped to that period. **Browse** mode is a horizontal-lane view with multi-select, bulk delete / move-to, sticky folder TOC, and three age tiers (1 / 2 / 3 years+). Built-in duplicate detection, dead-link checking, and empty-folder cleanup.
 
-### 👣 近期足迹
+### 👣 Recent Footprint
 
-7×24 周热力图直接显示你哪天哪个小时最忙，**点格子下钻**到那个时段的具体页面。配合高频域名 / 高频页面榜单，所有图表都可点过滤，顶部 chip 条显示当前过滤条件。时间窗口 24h / 3d / 7d / 30d / 90d 可切。
+A 7×24 weekly heatmap shows which days × hours you were most active. **Click any cell** to drill down into the actual pages visited at that slot. Pair with top-domain / top-page lists — every chart is clickable as a filter, with a chip bar at the top showing active filters. Time window: 24h / 3d / 7d / 30d / 90d.
+
+### 🎨 Three themes (top-right switcher)
+
+- **TypeSys** (default) — cool sage paper + warm beige cards + deep teal accent
+- **Roughcut Warm** — neutral cream + warm amber + brick red
+- **Dark** — near-black warm bg + lighter teal accent
+
+Choice persists across sessions.
 
 ---
 
-## 安装
+## Install
 
-### 方式一：交给 AI Agent
+### Option 1: hand it to a coding agent
 
-把这个仓库地址扔给 Claude Code / Codex / 类似工具：
+Send this repo URL to Claude Code / Codex / similar:
 
 ```
 https://github.com/KarenChuang/tab-bookmark
 ```
 
-跟它说"install this"，1 分钟搞定。
+Tell it "install this". Takes about a minute.
 
-### 方式二：手动
+### Option 2: manual
 
 ```bash
 git clone https://github.com/KarenChuang/tab-bookmark.git
 ```
 
-1. 进 `chrome://extensions`
-2. 打开右上角 **Developer mode**
-3. 点 **Load unpacked**，选 `extension/` 文件夹
-4. 第一次会弹「读取并修改你的书签 / 浏览历史」权限请求 — 点 **Enable**
+1. Open `chrome://extensions`
+2. Toggle **Developer mode** (top-right)
+3. Click **Load unpacked** and pick the `extension/` folder
+4. On first load Chrome will prompt for **"Read and change your bookmarks / browsing history"** — click **Enable**
 
-打开新标签页，就能看到。
+Open a new tab — that's it.
 
-### 更新
+### Updating
 
 ```bash
 cd tab-bookmark && git pull
 ```
 
-然后到 `chrome://extensions` 点扩展卡片右下角的 ↻ 重载。
+Then go to `chrome://extensions` and click the ↻ icon on the extension card.
 
 ---
 
-## 权限说明
+## Permissions
 
-| 权限 | 用途 |
+| Permission | Used for |
 |---|---|
-| `tabs` / `activeTab` | 读取并跳转所有打开的 tab |
-| `storage` | 存"稍后看"清单 |
-| `bookmarks` | 整理收藏夹的读 / 改 / 移 / 删 |
-| `history` | 近期足迹的读取 |
+| `tabs` / `activeTab` | Read and focus open tabs |
+| `storage` | Store the "save for later" checklist + theme preference |
+| `bookmarks` | Read / move / delete in the bookmarks organizer |
+| `history` | Read browsing history for the footprint view |
 
-**全部数据本地处理**。这个扩展不连任何服务器、不调任何外部 API、不传输任何数据。源码 100% 公开可审计。
+**All data stays on-device.** This extension does not connect to any server, call any external API, or transmit any data. Source is fully open and auditable.
 
 ---
 
-## 技术栈
+## Tech stack
 
-| 是什么 | 怎么做 |
+| What | How |
 |---|---|
-| 扩展 | Chrome Manifest V3 |
-| 存储 | `chrome.storage.local` + `chrome.bookmarks.*` |
-| 历史 | `chrome.history.search` + `chrome.history.getVisits` |
-| 失效检测 | `fetch HEAD/GET (no-cors)` + 6 秒超时 + 16 路并发 |
-| 拖拽 | 原生 HTML5 Drag & Drop API |
-| Sticky 导航 | `position: sticky` + IntersectionObserver |
-| 音效 | Web Audio API（合成，无音频文件） |
-| 动画 | CSS transitions + JS confetti particles |
+| Extension | Chrome Manifest V3 |
+| Storage | `chrome.storage.local` + `chrome.bookmarks.*` |
+| History | `chrome.history.search` + `chrome.history.getVisits` |
+| Dead-link check | `fetch HEAD/GET (no-cors)` + 6s timeout + 16-way concurrency |
+| Sticky nav | `position: sticky` + IntersectionObserver |
+| Sound | Web Audio API (synthesized, no audio files) |
+| Animation | CSS transitions + JS confetti particles |
 
 ---
 
 ## License
 
-MIT — 见 [LICENSE](./LICENSE)
+MIT — see [LICENSE](./LICENSE)
 
-- 原项目版权：MIT © 2026 Zara Zhang
-- 本 fork 新增功能版权：MIT © 2026 饼饼几 / Karen Chuang
+- Original project: MIT © 2026 Zara Zhang
+- Fork additions: MIT © 2026 饼饼几 / Karen Chuang
 
-按 MIT 你可以自由使用、修改、再分发，请保留原作者的版权声明。
+You're free to use, modify, and redistribute under MIT. Please retain the original copyright notice.
 
 ---
 
-## 致谢
+## Credits
 
-原始项目 [Tab Out by Zara](https://github.com/zarazhangrui/tab-out) 提供了完整的浏览器标签页面板和优雅的暖色基底。
+Original project [Tab Out by Zara](https://github.com/zarazhangrui/tab-out) provided the open-tabs dashboard and the warm-color foundation this fork iterates on.
 
 ---
 
