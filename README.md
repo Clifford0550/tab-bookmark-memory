@@ -1,147 +1,143 @@
 # 📚 Tab Bookmark
 
-**English** · [中文](./README.zh-CN.md)
+> 把浏览器收藏夹和历史记录变成一台时光机 —— 并用主动回忆把你那些"收藏了就忘"的链接重新激活。
 
-> Turn your browser bookmarks and history into a time machine — and bring your forgotten bookmarks back with active recall.
-
-🍴 Builds on [kellycatz/tab-bookmark](https://github.com/kellycatz/tab-bookmark) (itself forked from [zarazhangrui/tab-out](https://github.com/zarazhangrui/tab-out)) and adds a **🎲 Random Recall** view on top of its bookmarks organizer + recent history footprint.
-
-> ℹ️ **Language note:** the running UI is in **Simplified Chinese only** — English is not yet implemented (no `_locales` / i18n). This README is bilingual.
+🍴 基于 [kellycatz/tab-bookmark](https://github.com/kellycatz/tab-bookmark)（本身 fork 自 [zarazhangrui/tab-out](https://github.com/zarazhangrui/tab-out)），在它的「整理收藏夹」+「近期足迹」之上新增了 **🎲 随机回忆** 视图。
 
 ---
 
-## What is this
+## 这是什么
 
-Tab Bookmark is a Chrome extension that turns your new-tab page into four entry points:
+Tab Bookmark 是一个 Chrome 扩展，把你的新标签页变成四件事的入口：
 
-1. **🗂 Open Tabs** — All open tabs grouped by domain in real time
-2. **📚 Organize Bookmarks** — Rediscover and clean up the hundreds of legacy bookmarks
-3. **👣 Recent Footprint** — A 7×24 weekly heatmap of where you actually spent your time
-4. **🎲 Random Recall** — Surface weighted-random bookmarks as flashcards for active recall
+1. **🗂 浏览器标签** — 实时把所有打开的 tab 按域名分组
+2. **📚 整理收藏夹** — 重新认识 + 整理你那几百条祖传收藏
+3. **👣 近期足迹** — 用 7×24 热力图看你最近真正在花时间的地方
+4. **🎲 随机回忆** — 加权随机抽书签做单卡回忆，把吃灰收藏变成主动回忆
 
-100% local. No server, no external API calls, no account.
+完全本地。无服务器，无外部 API 调用，无账号。
 
 ---
 
 ## ✨ Features
 
-### 🗂 Open Tabs
+### 🗂 浏览器标签
 
-All open tabs grouped by domain into cards in real time. Homepages (Gmail / X / LinkedIn / YouTube / GitHub) get pulled into their own group. Closing tabs comes with a swoosh sound + confetti. Duplicate-tab detection, save-for-later checklist, localhost port labels for vibe-coding projects.
+打开的 tab 按域名实时分组成卡片，Homepages 单独抽出（Gmail / X / LinkedIn / YouTube / GitHub）。关闭带 swoosh 音效 + 撒花动画。重复 tab 检测、稍后看清单、localhost 端口区分。
 
-### 📚 Organize Bookmarks
+### 📚 整理收藏夹
 
-Two modes: **Time Machine** buckets your bookmarks into 3 / 6 / 12 month period cards — click the CTA on any card to drop into cleanup scoped to that period. **Browse** mode is a horizontal-lane view with multi-select, bulk delete / move-to, sticky folder TOC, and three age tiers (1 / 2 / 3 years+). Built-in duplicate detection, dead-link checking, and empty-folder cleanup.
+两种模式：**时光机** 把书签按 3 / 6 / 12 个月切成时段卡片，看完点 CTA 就能进入对应时段的整理；**浏览整理** 是横向 lane 视图，支持多选批量删除 / 移动、sticky 文件夹导航。自带重复检测、失效检测、空文件夹清理、三档年龄分层（1 / 2 / 3 年+ 用 tag 标记）。
 
-### 👣 Recent Footprint
+### 👣 近期足迹
 
-A 7×24 weekly heatmap shows which days × hours you were most active. **Click any cell** to drill down into the actual pages visited at that slot. Pair with top-domain / top-page lists — every chart is clickable as a filter, with a chip bar at the top showing active filters. Time window: 24h / 3d / 7d / 30d / 90d.
+7×24 周热力图直接显示你哪天哪个小时最忙，**点格子下钻**到那个时段的具体页面。配合高频域名 / 高频页面榜单，所有图表都可点过滤，顶部 chip 条显示当前过滤条件。时间窗口 24h / 3d / 7d / 30d / 90d 可切。
 
-### 🎲 Random Recall
+### 🎲 随机回忆
 
-Surfaces your bookmarks **one at a time** as a big flashcard, picked by **weighted random** — 待回忆 (to-review) shows up most, 已掌握 (mastered) rarely resurfaces, so review effort goes where it matters. For each card you can:
+把书签**一张一张**地以大卡片形式翻出来，按**加权随机**抽取——「待回忆」最常出现、「已掌握」极少再现，让复习精力花在刀刃上。每张卡片你可以：
 
-- **Open** the page in a new tab
-- **Move to folder** (reuses the bookmarks organizer's folder list)
-- **Delete** the bookmark
-- Mark **已掌握 (mastered)** or **待回忆 (to-review)**
+- **打开** 该网页（新标签）
+- **移动到文件夹**（复用整理收藏夹的文件夹列表）
+- **取消收藏**（删除）
+- 标记 **已掌握** 或 **待回忆**
 
-Review state persists locally in `chrome.storage.local`, so your progress survives restarts, and orphaned state for deleted bookmarks is pruned automatically. Turns "bookmarked-and-forgotten" links into an active-recall habit.
+复习状态存在本地 `chrome.storage.local`，重启后进度保留，已删书签的孤儿状态会自动清理。把"收藏了就忘"的链接变成主动回忆的习惯。
 
-### 🎨 Three themes (top-right switcher)
+### 🎨 三套主题（右上角圆点切换）
 
-- **TypeSys** (default) — cool sage paper + warm beige cards + deep teal accent
-- **Roughcut Warm** — neutral cream + warm amber + brick red
-- **Dark** — near-black warm bg + lighter teal accent
+- **TypeSys**（默认）— 沙绿底 + 暖米卡片 + 深松石绿强调
+- **Roughcut Warm** — 中性奶油 + 暖橙 + 砖红
+- **Dark** — 近黑暖底 + 浅松石绿强调
 
-Choice persists across sessions.
+选择会持久化，下次打开自动恢复。
 
 ---
 
-## Install
+## 安装
 
-### Option 1: Download ZIP (easiest, no git required)
+### 方式一：下载 ZIP（最简单，不需要 git）
 
-1. Click the green **Code** button at the top-right of this repo's home page → **Download ZIP**
-2. **Unzip** the file anywhere (e.g. Desktop)
-3. Open Chrome and go to `chrome://extensions/`
-4. Toggle **Developer mode** (top-right)
-5. Click **Load unpacked** (top-left) and pick the `extension/` folder inside the unzipped directory
-6. Open a new tab — Chrome will prompt **"This page was changed by extension 'Tab Out'"** the first time → click **Keep changes**
+1. 点这个仓库主页右上角绿色的 **Code** 按钮 → **Download ZIP**
+2. 下载完成后，**解压**到任意位置（比如桌面）
+3. 打开 Chrome，地址栏输入 `chrome://extensions/`
+4. 打开右上角 **开发者模式** 开关
+5. 点左上角 **加载未打包的扩展程序**，选刚刚解压出来的文件夹里的 `extension` 子文件夹
+6. 打开一个新标签页，第一次会弹提示「**此网页被扩展"Tab Out"更改**」→ 点 **保持现状**
 
-Done.
+完成。
 
-### Option 2: hand it to a coding agent
+### 方式二：交给 AI Agent
 
-Send this repo URL to Claude Code / Codex / similar:
+把这个仓库地址扔给 Claude Code / Codex / 类似工具：
 
 ```
 https://github.com/Clifford0550/tab-bookmark-memory
 ```
 
-Tell it "install this". Takes about a minute.
+跟它说"install this"，1 分钟搞定。
 
-### Option 3: clone with git
+### 方式三：用 git 手动克隆
 
 ```bash
 git clone https://github.com/Clifford0550/tab-bookmark-memory.git
 ```
 
-Then follow steps 3–6 of Option 1.
+剩下步骤同方式一的 3-6 步。
 
-### Updating
+### 更新
 
 ```bash
 cd tab-bookmark && git pull
 ```
 
-Then go to `chrome://extensions` and click the ↻ icon on the extension card.
+然后到 `chrome://extensions` 点扩展卡片右下角的 ↻ 重载。
 
 ---
 
-## Permissions
+## 权限说明
 
-| Permission | Used for |
+| 权限 | 用途 |
 |---|---|
-| `tabs` / `activeTab` | Read and focus open tabs |
-| `storage` | Store the "save for later" checklist + theme preference |
-| `bookmarks` | Read / move / delete in the bookmarks organizer |
-| `history` | Read browsing history for the footprint view |
+| `tabs` / `activeTab` | 读取并跳转所有打开的 tab |
+| `storage` | 存"稍后看"清单 + 主题选择 |
+| `bookmarks` | 整理收藏夹的读 / 改 / 移 / 删 |
+| `history` | 近期足迹的读取 |
 
-**All data stays on-device.** This extension does not connect to any server, call any external API, or transmit any data. Source is fully open and auditable.
+**全部数据本地处理**。这个扩展不连任何服务器、不调任何外部 API、不传输任何数据。源码 100% 公开可审计。
 
 ---
 
-## Tech stack
+## 技术栈
 
-| What | How |
+| 是什么 | 怎么做 |
 |---|---|
-| Extension | Chrome Manifest V3 |
-| Storage | `chrome.storage.local` + `chrome.bookmarks.*` |
-| History | `chrome.history.search` + `chrome.history.getVisits` |
-| Dead-link check | `fetch HEAD/GET (no-cors)` + 6s timeout + 16-way concurrency |
-| Sticky nav | `position: sticky` + IntersectionObserver |
-| Sound | Web Audio API (synthesized, no audio files) |
-| Animation | CSS transitions + JS confetti particles |
+| 扩展 | Chrome Manifest V3 |
+| 存储 | `chrome.storage.local` + `chrome.bookmarks.*` |
+| 历史 | `chrome.history.search` + `chrome.history.getVisits` |
+| 失效检测 | `fetch HEAD/GET (no-cors)` + 6 秒超时 + 16 路并发 |
+| Sticky 导航 | `position: sticky` + IntersectionObserver |
+| 音效 | Web Audio API（合成，无音频文件） |
+| 动画 | CSS transitions + JS confetti particles |
 
 ---
 
 ## License
 
-MIT — see [LICENSE](./LICENSE)
+MIT — 见 [LICENSE](./LICENSE)
 
-- Original project: MIT © 2026 Zara Zhang
-- Bookmarks organizer + history footprint: MIT © 2026 饼饼几
-- Random Recall view: MIT © 2026 Clifford
+- 原项目版权：MIT © 2026 Zara Zhang
+- 整理收藏夹 + 近期足迹：MIT © 2026 饼饼几
+- 随机回忆视图：MIT © 2026 Clifford
 
-You're free to use, modify, and redistribute under MIT. Please retain the original copyright notice.
-
----
-
-## Credits
-
-Original project [Tab Out by Zara](https://github.com/zarazhangrui/tab-out) provided the open-tabs dashboard and the warm-color foundation this fork iterates on.
+按 MIT 你可以自由使用、修改、再分发，请保留原作者的版权声明。
 
 ---
 
-🎲 Random Recall view built by [Clifford](https://github.com/Clifford0550) on top of [tab-bookmark](https://github.com/kellycatz/tab-bookmark) by [饼饼几](https://www.xiaohongshu.com/user/profile/654a536a000000000400a77e), itself based on [Tab Out](https://github.com/zarazhangrui/tab-out) by Zara.
+## 致谢
+
+原始项目 [Tab Out by Zara](https://github.com/zarazhangrui/tab-out) 提供了完整的浏览器标签页面板和优雅的暖色基底。
+
+---
+
+🎲 随机回忆视图由 [Clifford](https://github.com/Clifford0550) 在 [饼饼几](https://www.xiaohongshu.com/user/profile/654a536a000000000400a77e) 的 [tab-bookmark](https://github.com/kellycatz/tab-bookmark) 基础上开发，后者又基于 Zara 的 [Tab Out](https://github.com/zarazhangrui/tab-out)。
