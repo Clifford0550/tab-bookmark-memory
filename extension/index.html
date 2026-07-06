@@ -59,6 +59,7 @@
     <button class="view-tab is-active" data-view="tabs">浏览器标签</button>
     <button class="view-tab" data-view="bookmarks">整理收藏夹</button>
     <button class="view-tab" data-view="history">近期足迹</button>
+    <button class="view-tab" data-view="review">🎲 随机回忆</button>
   </nav>
 
   <!-- ================================================================
@@ -260,6 +261,22 @@
     </section>
 
     <div class="hist-status" id="histStatus"></div>
+  </div>
+
+  <!-- ================================================================
+       随机回忆 — Random flashcard review of bookmarks
+       Picks a weighted-random bookmark as a big card; you can open,
+       delete, move it, or mark 已掌握/待回忆. Lazily loads bookmarks
+       on first switch (see setActiveView in app.js).
+       ================================================================ -->
+  <div class="review-section view-pane" id="reviewSection" data-view="review">
+    <div class="section-header">
+      <h2>随机回忆</h2>
+      <div class="section-line"></div>
+      <div class="section-count" id="reviewCount"></div>
+    </div>
+    <div class="review-stage" id="reviewStage"><!-- big card injected by app.js --></div>
+    <div class="review-empty" id="reviewEmpty" style="display:none">没有可回忆的书签，先去整理收藏夹吧。</div>
   </div>
 
   <!-- ================================================================

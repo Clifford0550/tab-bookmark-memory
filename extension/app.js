@@ -3003,7 +3003,7 @@ document.getElementById('histFilterChips')?.addEventListener('click', (e) => {
 /* ----------------------------------------------------------------
    VIEW TABS — switch between Open Tabs / 整理收藏夹 / 时间洞察 / 近期足迹
    ---------------------------------------------------------------- */
-function setActiveView(view) {
+async function setActiveView(view) {
   document.body.dataset.view = view;
   document.querySelectorAll('.view-tab').forEach(t => {
     t.classList.toggle('is-active', t.dataset.view === view);
@@ -3013,6 +3013,11 @@ function setActiveView(view) {
   });
   if (view === 'bookmarks' && !bmLoaded) loadBookmarks();
   if (view === 'history' && !histLoaded) loadHistoryInsights();
+  if (view === 'review') {
+    if (!bmLoaded) await loadBookmarks();
+    await loadReviewState();
+    renderReviewCard();
+  }
 }
 
 document.getElementById('viewTabs')?.addEventListener('click', (e) => {
@@ -3052,6 +3057,232 @@ document.getElementById('themeSwitcher')?.addEventListener('click', async (e) =>
   const theme = btn.dataset.theme;
   applyTheme(theme);
   try { await chrome.storage.local.set({ [THEME_KEY]: theme }); } catch {}
+});
+
+
+/* ================================================================
+   随机回忆 — Random flashcard review of bookmarks (Feature 2)
+
+   Pulls a weighted-random bookmark from bmFlat, shows it as a big
+   card, and lets you open / delete / move it or mark 已掌握·待回忆.
+   'mastered' items rarely resurface; 'review' (待回忆) come up most.
+
+   Reuses the bookmarks module: bmFlat (all bookmarks), bmFolders
+   (folder list for the move picker), loadBookmarks(), deleteBookmark(),
+   moveBookmark(), bmFaviconUrl/bmDomain/timeAgo.
+
+   Review state persists in chrome.storage.local under "bmReview".
+   ================================================================ */
+const REVIEW_KEY = 'bmReview';
+const REVIEW_WEIGHTS = { mastered: 0.1, new: 1.0, review: 1.5 };
+
+let bmReview = {};          // id -> { status: 'new'|'review'|'mastered', reviewedAt, reviewCount }
+let reviewCurrent = null;   // currently shown bookmark (a bmFlat item)
+
+async function loadReviewState() {
+  try {
+    const obj = await chrome.storage.local.get(REVIEW_KEY);
+    const saved = obj?.[REVIEW_KEY] || {};
+    // Prune orphans: keep only ids that still exist in bmFlat
+    const live = new Set(bmFlat.map(b => b.id));
+    bmReview = {};
+    for (const id of Object.keys(saved)) if (live.has(id)) bmReview[id] = saved[id];
+  } catch {
+    bmReview = {};
+  }
+}
+
+async function saveReviewState() {
+  try { await chrome.storage.local.set({ [REVIEW_KEY]: bmReview }); } catch {}
+}
+
+function reviewStatusOf(id) {
+  return bmReview[id]?.status || 'new';
+}
+
+function reviewStatusLabel(s) {
+  return s === 'mastered' ? '已掌握' : s === 'review' ? '待回忆' : '未回忆';
+}
+
+/**
+ * pickReviewBookmark()
+ *
+ * Weighted-random pick from bmFlat (only items with a url).
+ * mastered → 0.1, new → 1.0, review → 1.5. Returns null if empty.
+ */
+function pickReviewBookmark() {
+  const items = bmFlat.filter(b => b.url);
+  if (!items.length) return null;
+  const weighted = items.map(b => ({ b, w: REVIEW_WEIGHTS[reviewStatusOf(b.id)] ?? 1 }));
+  const total = weighted.reduce((s, x) => s + x.w, 0);
+  if (total <= 0) return items[0];
+  let r = Math.random() * total;
+  for (const x of weighted) {
+    r -= x.w;
+    if (r <= 0) return x.b;
+  }
+  return items[items.length - 1];
+}
+
+/**
+ * renderReviewCard()
+ *
+ * Renders the current (newly picked) bookmark as a big card into
+ * #reviewStage, plus an action bar. Updates the section count.
+ */
+function renderReviewCard() {
+  const stage   = document.getElementById('reviewStage');
+  const empty   = document.getElementById('reviewEmpty');
+  const countEl = document.getElementById('reviewCount');
+  if (!stage) return;
+
+  reviewCurrent = pickReviewBookmark();
+
+  // Counters
+  const total    = bmFlat.filter(b => b.url).length;
+  const mastered = Object.values(bmReview).filter(v => v.status === 'mastered').length;
+  const todo     = Object.values(bmReview).filter(v => v.status === 'review').length;
+  if (countEl) countEl.textContent = total ? `共 ${total} · 已掌握 ${mastered} · 待回忆 ${todo}` : '';
+
+  if (!reviewCurrent) {
+    stage.innerHTML = '';
+    if (empty) empty.style.display = 'block';
+    return;
+  }
+  if (empty) empty.style.display = 'none';
+
+  const b      = reviewCurrent;
+  const status = reviewStatusOf(b.id);
+  const ago    = b.dateAdded ? timeAgo(new Date(b.dateAdded).toISOString()) : '';
+  const folder = b.folderPath || '';
+
+  stage.innerHTML = `
+    <div class="review-card">
+      <div class="rc-top">
+        <img class="rc-fav" src="${bmFaviconUrl(b.url)}" alt="" onerror="this.style.visibility='hidden'">
+        <span class="rc-domain">${escapeHtml(bmDomain(b.url))}</span>
+        <span class="rc-status rc-status-${status}">${reviewStatusLabel(status)}</span>
+      </div>
+      <a class="rc-title" href="${escapeHtml(b.url)}" target="_blank" rel="noopener" title="${escapeHtml(b.title || b.url)}">${escapeHtml(b.title || b.url)}</a>
+      <div class="rc-url">${escapeHtml(b.url)}</div>
+      <div class="rc-meta">
+        ${ago ? `<span>⏱ ${ago}</span>` : ''}
+        ${folder ? `<span>📁 ${escapeHtml(folder)}</span>` : ''}
+      </div>
+      <div class="review-actions">
+        <button class="rva primary" data-review-action="open">↗ 打开</button>
+        <button class="rva" data-review-action="mastered">✓ 已掌握</button>
+        <button class="rva" data-review-action="todo">⏳ 待回忆</button>
+        <button class="rva" data-review-action="move">📁 移动到…</button>
+        <button class="rva danger" data-review-action="remove">✕ 取消收藏</button>
+        <button class="rva" data-review-action="next">⇥ 下一张</button>
+      </div>
+      <div class="review-move-row" id="reviewMoveRow" style="display:none">
+        <select class="bm-select" id="reviewMoveSelect"></select>
+        <button class="rva primary" data-review-action="move-confirm">移动</button>
+        <button class="rva" data-review-action="move-cancel">取消</button>
+      </div>
+    </div>`;
+}
+
+/**
+ * reviewNext()
+ *
+ * Brief fade-out, then pick + render the next random card.
+ */
+function reviewNext() {
+  const stage = document.getElementById('reviewStage');
+  const card  = stage?.querySelector('.review-card');
+  if (card) card.classList.add('leaving');
+  setTimeout(renderReviewCard, card ? 160 : 0);
+}
+
+/**
+ * reviewSetStatus(status)
+ *
+ * Records a review event for the current bookmark and persists it.
+ */
+function reviewSetStatus(status) {
+  if (!reviewCurrent) return;
+  const prev = bmReview[reviewCurrent.id] || { status: 'new', reviewCount: 0 };
+  bmReview[reviewCurrent.id] = {
+    status,
+    reviewedAt: new Date().toISOString(),
+    reviewCount: (prev.reviewCount || 0) + 1,
+  };
+  saveReviewState();
+}
+
+/**
+ * populateReviewMoveSelect()
+ *
+ * Fills the move-to-folder <select> from bmFolders, excluding the
+ * bookmark's current parent.
+ */
+function populateReviewMoveSelect() {
+  const sel = document.getElementById('reviewMoveSelect');
+  if (!sel) return;
+  const curParent = reviewCurrent?.parentId;
+  sel.innerHTML = bmFolders
+    .filter(f => f.id !== curParent)
+    .map(f => `<option value="${escapeHtml(f.id)}">${escapeHtml(f.path || f.title)}</option>`)
+    .join('');
+}
+
+/**
+ * Scoped click listener for the review stage.
+ * Uses data-review-action (not data-action) so it never collides with
+ * the global [data-action] delegation.
+ */
+document.getElementById('reviewStage')?.addEventListener('click', async (e) => {
+  const el = e.target.closest('[data-review-action]');
+  if (!el || !reviewCurrent) return;
+  const act = el.dataset.reviewAction;
+  const id  = reviewCurrent.id;
+  const url = reviewCurrent.url;
+
+  switch (act) {
+    case 'open':
+      chrome.tabs.create({ url });
+      return;
+    case 'next':
+      reviewNext();
+      return;
+    case 'mastered':
+      reviewSetStatus('mastered');
+      playCloseSound?.();
+      reviewNext();
+      return;
+    case 'todo':
+      reviewSetStatus('review');
+      showToast?.('已标记为「待回忆」');
+      reviewNext();
+      return;
+    case 'remove':
+      await deleteBookmark(id);          // reuses: remove + bmFlat update + counters
+      showToast?.('已取消收藏');
+      reviewCurrent = null;
+      reviewNext();
+      return;
+    case 'move': {
+      const row = document.getElementById('reviewMoveRow');
+      if (row) { populateReviewMoveSelect(); row.style.display = 'flex'; }
+      return;
+    }
+    case 'move-cancel': {
+      const row = document.getElementById('reviewMoveRow');
+      if (row) row.style.display = 'none';
+      return;
+    }
+    case 'move-confirm': {
+      const sel = document.getElementById('reviewMoveSelect');
+      const parentId = sel?.value;
+      if (!parentId) return;
+      await moveBookmark(id, parentId);  // reuses: move + bmFlat update + toast
+      reviewNext();
+      return;
+    }
+  }
 });
 
 
